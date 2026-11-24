@@ -30,7 +30,7 @@ final class UserNotedWatcher {
     private var lastSeenRecId: Int64 = -1
     private var isInitialized = false
     private var monitoredApps: [MonitoredApp] = MonitoredApp.defaultApps
-    private let queue = DispatchQueue(label: "local.max.MsgOrb.usernoted", qos: .utility)
+    private let queue = DispatchQueue(label: "io.github.deep-octopus.Murmur.usernoted", qos: .utility)
 
     init(
         initialApps: [MonitoredApp],

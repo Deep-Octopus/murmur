@@ -157,7 +157,7 @@ enum AppPickerHelper {
     @MainActor
     static func pickApplicationFromDisk() -> MonitoredApp? {
         let panel = NSOpenPanel()
-        panel.title = "选择要加入 MsgOrb 监控的软件"
+        panel.title = "选择要加入 Murmur 监控的软件"
         panel.prompt = "添加监控"
         panel.canChooseFiles = true
         panel.canChooseDirectories = false

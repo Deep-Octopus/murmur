@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-APP_NAME="MsgOrb"
+APP_NAME="Murmur"
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 
@@ -14,7 +14,7 @@ mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 swiftc -parse-as-library -Onone -swift-version 5 \
-    Sources/MsgOrb/*.swift \
+    Sources/Murmur/*.swift \
     -lsqlite3 \
     -framework AppKit \
     -framework SwiftUI \
@@ -39,17 +39,17 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<'EOF'
     <key>CFBundleDevelopmentRegion</key>
     <string>zh_CN</string>
     <key>CFBundleDisplayName</key>
-    <string>MsgOrb</string>
+    <string>Murmur</string>
     <key>CFBundleExecutable</key>
-    <string>MsgOrb</string>
+    <string>Murmur</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
-    <string>local.max.MsgOrb</string>
+    <string>io.github.deep-octopus.Murmur</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>MsgOrb</string>
+    <string>Murmur</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

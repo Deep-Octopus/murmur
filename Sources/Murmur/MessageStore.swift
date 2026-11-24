@@ -113,7 +113,7 @@ final class MessageStore: ObservableObject {
     init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
-        let dir = appSupport.appendingPathComponent("MsgOrb", isDirectory: true)
+        let dir = appSupport.appendingPathComponent("Murmur", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         self.stateFileURL = dir.appendingPathComponent("queue_state_v5.json")
         self.appsFileURL = dir.appendingPathComponent("monitored_apps_v1.json")

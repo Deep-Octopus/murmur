@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 @main
-struct MsgOrbMain {
+struct MurmurMain {
     static func main() {
         let app = NSApplication.shared
         let delegate = AppDelegate()
@@ -87,7 +87,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let button = statusItem.button {
             button.image = NSImage(
                 systemSymbolName: "tray.and.arrow.down",
-                accessibilityDescription: "MsgOrb"
+                accessibilityDescription: "Murmur"
             )
         }
 

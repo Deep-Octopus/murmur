@@ -627,7 +627,7 @@ final class FloatingPanelController: NSObject {
 
         menu.addItem(.separator())
 
-        let quitItem = NSMenuItem(title: "退出 MsgOrb", action: #selector(menuQuit), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "退出 Murmur", action: #selector(menuQuit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
 

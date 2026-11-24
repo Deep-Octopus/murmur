@@ -2,17 +2,17 @@
 import PackageDescription
 
 let package = Package(
-    name: "MsgOrb",
+    name: "Murmur",
     platforms: [
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "MsgOrb", targets: ["MsgOrb"])
+        .executable(name: "Murmur", targets: ["Murmur"])
     ],
     targets: [
         .executableTarget(
-            name: "MsgOrb",
-            path: "Sources/MsgOrb",
+            name: "Murmur",
+            path: "Sources/Murmur",
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("SwiftUI"),

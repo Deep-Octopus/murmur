@@ -12,7 +12,7 @@ struct AXWorldObservation {
 }
 
 final class AccessibilityBridge {
-    private let axQueue = DispatchQueue(label: "local.max.MsgOrb.ax", qos: .utility)
+    private let axQueue = DispatchQueue(label: "io.github.deep-octopus.Murmur.ax", qos: .utility)
     private var pollTimer: Timer?
     private var enabledExtendedPIDs: [pid_t: TimeInterval] = [:]
     private var ncObserver: AXObserver?

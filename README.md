@@ -1,19 +1,20 @@
-# MsgOrb
+# Murmur
 
-> **安静、克制、零侵入的 macOS 多平台消息聚合悬浮胶囊**
-> 专为同时挂着多家企业飞书、微信、QQ、钉钉、Slack 的多屏重度办公者打造。
+> *Turn loud chat chaos into a calm murmur.*
+> **把喧嚣的多软件消息轰炸，降噪成桌角一声克制的低语。**
+> 专为同时挂着多家企业飞书、微信、QQ、钉钉、Slack 的 macOS 多屏重度办公者打造。
 
 ![浅色纸感模式](Resources/previews/v4_3_queue_light.png)
 ![深色石墨模式](Resources/previews/v4_4_queue_dark.png)
 
-## 为什么做 MsgOrb？
+## 为什么做 Murmur？
 
 当你同时加入三家公司的飞书租户、挂着十几个微信与 QQ 项目群、外接两三块显示器写代码时：
 - 来回 `⌘ + Tab` 切软件、切企业租户极其打断心流；
 - 市面上的逆向 Hook 工具存在严重的**封号风险**，企业开放平台机器人又需要各家公司管理员审批；
 - 花哨的弹窗聚合器看半小时就会造成强烈的视觉疲劳。
 
-**MsgOrb 的设计哲学**：
+**Murmur 的设计哲学**：
 1. **100% 浅层零侵入**：不注入动态库、不逆向协议、不解密聊天数据库、不发任何网络请求。仅通过 macOS 原生无障碍树（`AXUIElement`）与系统通知中心事件监听提取未读信号。
 2. **纯时间顺序 + 防久置沉底**：拒绝不可控的黑盒乱序，默认将**等待最久未处理的会话**排在第一行（支持切换最新在前），满 5 分钟暖色微标提醒、满 15 分钟陶土红时钟提醒并温和复醒，保证重要消息绝不漏单。
 3. **全天 10 小时零视觉疲劳**：单一圆角锚定表面阻尼展开，支持浅色纸感 / 深色石墨自适应，仅用高清原生应用图标作为色彩锚点，取消一切循环闪烁光效。
@@ -39,11 +40,11 @@
 
 ### 方式一：直接下载预编译包（推荐）
 
-1. 前往 [GitHub Releases](https://github.com/Deep-Octopus/msg-orb/releases) 下载最新的 `MsgOrb-v1.0.0-macOS-arm64.zip`，解压后将 `MsgOrb.app` 拖入 `/Applications`（应用程序）目录；
+1. 前往 [GitHub Releases](https://github.com/Deep-Octopus/murmur/releases) 下载最新的 `Murmur-v1.0.0-macOS-arm64.zip`，解压后将 `Murmur.app` 拖入 `/Applications`（应用程序）目录；
 2. 首次打开若提示未签名应用拦截，执行一次去隔离标记后即可运行：
    ```bash
-   xattr -cr /Applications/MsgOrb.app
-   open /Applications/MsgOrb.app
+   xattr -cr /Applications/Murmur.app
+   open /Applications/Murmur.app
    ```
 
 ### 方式二：源码一键构建
@@ -51,14 +52,14 @@
 环境要求：**macOS 14.0+**（已兼容 macOS Sequoia / Tahoe / 27），安装 Xcode Command Line Tools 即可构建（零第三方依赖）。
 
 ```bash
-git clone https://github.com/Deep-Octopus/msg-orb.git
-cd msg-orb
+git clone https://github.com/Deep-Octopus/murmur.git
+cd murmur
 chmod +x scripts/build_app.sh
 ./scripts/build_app.sh
-open /Applications/MsgOrb.app
+open /Applications/Murmur.app
 ```
 
-首次启动后点击面板顶部提示开启 **系统设置 → 隐私与安全性 → 辅助功能 → MsgOrb** 即可。
+首次启动后点击面板顶部提示开启 **系统设置 → 隐私与安全性 → 辅助功能 → Murmur** 即可。
 > 💡 **自编译权限保活提示**：若本机钥匙串中存在 `Apple Development` 证书，`scripts/build_app.sh` 会自动使用证书签名，后续版本升级无需重复勾选辅助功能权限。
 
 ---
@@ -73,7 +74,7 @@ open /Applications/MsgOrb.app
 | `⌫ Delete` | 将当前选中会话标记为已完成（5秒内可撤销） |
 | `S` | 将当前选中会话延后 15 分钟再提醒 |
 | `Esc` | 收起面板并归还焦点 |
-| `按住 ⌥ 拖动` | 在开启「锁定位置」时临时拖动悬浮球 |
+| `按住 ⌥ 拖动` | 在开启「锁定位置」时临时拖动悬浮胶囊 |
 
 ---
 
