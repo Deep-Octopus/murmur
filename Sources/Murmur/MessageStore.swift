@@ -3,7 +3,7 @@ import ServiceManagement
 import SwiftUI
 
 struct UndoSnapshot {
-    let item: MessageItem
+    let items: [MessageItem]
     let mutedRule: MutedConversationRule?
     let label: String
 }
@@ -11,6 +11,7 @@ struct UndoSnapshot {
 private struct PersistedQueueState: Codable {
     var items: [MessageItem]
     var handledRevisions: [String: String]
+    var handledRevisionOrder: [String]?
     var seenNotificationKeys: [String]
     var mutedRules: [MutedConversationRule]
 }
@@ -19,29 +20,35 @@ private struct PersistedQueueState: Codable {
 final class MessageStore: ObservableObject {
     @Published var monitoredApps: [MonitoredApp] = MonitoredApp.defaultApps
     @Published var items: [MessageItem] = []
+    @Published var suppressedMutedItems: [MessageItem] = []
     @Published var mutedRules: [MutedConversationRule] = []
 
     @Published var isExpanded: Bool = false
+    @Published var isPinnedExpanded: Bool = false
+    @Published var isModalPickerOpen: Bool = false
     @Published var showSettings: Bool = false
     @Published var showSnoozedSheet: Bool = false
+    @Published var showMutedDrawer: Bool = false
     @Published var selectedFilterAppId: String? = nil
+    @Published var expandedBodyItemId: String? = nil
     @Published var activePeek: PeekPayload? = nil
     @Published var undoBanner: UndoSnapshot? = nil
     @Published var transientNotice: String? = nil
     @Published var pausePeeksUntil: Date? = nil
+    @Published var hotKeyConflictError: Bool = false
 
     @Published var now: Date = Date()
     @Published var dockBadges: [String: DockBadgeReading] = [:]
     @Published var hasAccessibilityPermission: Bool = true
     @Published var notificationReaderState: NotificationReaderState = .checking
 
-    // UI & Keyboard interaction states
+    // UI & Keyboard interaction states (kept on ObservableObject to avoid SwiftUIMacros dependency)
     @Published var isOrbHovering: Bool = false
     @Published var isOrbPressed: Bool = false
     @Published var isPeekHovered: Bool = false
     @Published var hoveredRowId: String? = nil
     @Published var selectedKeyboardIndex: Int = 0
-    @Published var settingsTab: Int = 0 // 0: 监控软件, 1: 外观与快捷键, 2: 提醒与屏蔽
+    @Published var settingsTab: Int = 0 // 0: 监控软件, 1: 外观与热键, 2: 降噪与提醒
     @Published var dismissedSetupHint: Bool = false
     @Published var launchAtLogin: Bool = (SMAppService.mainApp.status == .enabled)
 
@@ -49,12 +56,15 @@ final class MessageStore: ObservableObject {
     @AppStorage("overdueMinutes") var overdueMinutes: Int = 15
     @AppStorage("repeatOverdueEveryMinutes") var repeatOverdueEveryMinutes: Int = 10
     @AppStorage("sortOldestFirst") var sortOldestFirst: Bool = true
+    @AppStorage("autoFilterMutedChats") var autoFilterMutedChats: Bool = true
+    @AppStorage("hideOrbWhenIdle") var hideOrbWhenIdle: Bool = false
     @AppStorage("appearanceMode") var appearanceModeRaw: String = AppearanceMode.system.rawValue
     @AppStorage("orbScale") var orbScale: Double = 1.05
     @AppStorage("idleOpacity") var idleOpacity: Double = 0.92
     @AppStorage("windowLevelMode") var windowLevelModeRaw: String = WindowLevelMode.alwaysOnTop.rawValue
     @AppStorage("lockOrbPosition") var lockOrbPosition: Bool = false
     @AppStorage("enableGlobalHotkey") var enableGlobalHotkey: Bool = true
+    @AppStorage("hotKeyPreset") var hotKeyPresetRaw: String = HotKeyPreset.optionM.rawValue
 
     var appearanceMode: AppearanceMode {
         get { AppearanceMode(rawValue: appearanceModeRaw) ?? .system }
@@ -74,6 +84,15 @@ final class MessageStore: ObservableObject {
         }
     }
 
+    var hotKeyPreset: HotKeyPreset {
+        get { HotKeyPreset(rawValue: hotKeyPresetRaw) ?? .optionM }
+        set {
+            hotKeyPresetRaw = newValue.rawValue
+            objectWillChange.send()
+            onHotkeySettingChanged?(enableGlobalHotkey)
+        }
+    }
+
     var isPeeksPaused: Bool {
         guard let until = pausePeeksUntil else { return false }
         return now < until
@@ -89,6 +108,13 @@ final class MessageStore: ObservableObject {
         return .compact
     }
 
+    var shouldHideDesktopOrb: Bool {
+        hideOrbWhenIdle
+            && surfaceMode == .compact
+            && pendingItemCount == 0
+            && !hasUnresolvedAggregatePresence
+    }
+
     var onLayoutNeedsUpdate: ((Bool) -> Void)?
     var onWindowConfigChanged: (() -> Void)?
     var onHotkeySettingChanged: ((Bool) -> Void)?
@@ -96,6 +122,7 @@ final class MessageStore: ObservableObject {
     var onSnapCornerRequested: ((ScreenCorner) -> Void)?
     var onJumpRequested: ((MessageItem, MonitoredApp) -> JumpOutcome)?
     var onOpenAppRequested: ((MonitoredApp) -> Void)?
+    var onStatusItemNeedsUpdate: (() -> Void)?
 
     private var agingTimer: Timer?
     private var peekDismissTask: Task<Void, Never>?
@@ -104,7 +131,7 @@ final class MessageStore: ObservableObject {
 
     private var seenNotificationKeys: Set<String> = []
     private var handledRevisions: [String: String] = [:]
-    private var previousDockBadges: [String: DockBadgeReading] = [:]
+    private var handledRevisionOrder: [String] = []
     private var missingSidebarScanCounts: [String: Int] = [:]
 
     private let stateFileURL: URL
@@ -137,6 +164,7 @@ final class MessageStore: ObservableObject {
             dockTileNames: [id],
             isEnabled: true,
             supportsTenantRail: false,
+            sumsUnreadInDockBadge: true,
             isBuiltIn: false
         )
     }
@@ -147,11 +175,13 @@ final class MessageStore: ObservableObject {
         let isNowEnabled = monitoredApps[idx].isEnabled
         if !isNowEnabled {
             items.removeAll { $0.appId == appId }
+            suppressedMutedItems.removeAll { $0.appId == appId }
             if selectedFilterAppId == appId { selectedFilterAppId = nil }
         }
         saveMonitoredApps()
         savePersistedState()
         onMonitoredAppsChanged?(monitoredApps)
+        onStatusItemNeedsUpdate?()
         onLayoutNeedsUpdate?(true)
     }
 
@@ -167,6 +197,7 @@ final class MessageStore: ObservableObject {
         }
         saveMonitoredApps()
         onMonitoredAppsChanged?(monitoredApps)
+        onStatusItemNeedsUpdate?()
         onLayoutNeedsUpdate?(true)
     }
 
@@ -176,11 +207,30 @@ final class MessageStore: ObservableObject {
         let removedName = monitoredApps[idx].displayName
         monitoredApps.remove(at: idx)
         items.removeAll { $0.appId == appId }
+        suppressedMutedItems.removeAll { $0.appId == appId }
         if selectedFilterAppId == appId { selectedFilterAppId = nil }
         saveMonitoredApps()
         savePersistedState()
         onMonitoredAppsChanged?(monitoredApps)
+        onStatusItemNeedsUpdate?()
         showNotice("已移除：\(removedName)")
+        onLayoutNeedsUpdate?(true)
+    }
+
+    func setAutoFilterMutedChats(_ enabled: Bool) {
+        autoFilterMutedChats = enabled
+        if !enabled {
+            suppressedMutedItems = []
+            showMutedDrawer = false
+        }
+        objectWillChange.send()
+        onMonitoredAppsChanged?(monitoredApps)
+        onLayoutNeedsUpdate?(true)
+    }
+
+    func setHideOrbWhenIdle(_ enabled: Bool) {
+        hideOrbWhenIdle = enabled
+        objectWillChange.send()
         onLayoutNeedsUpdate?(true)
     }
 
@@ -209,6 +259,7 @@ final class MessageStore: ObservableObject {
             dismissPeek(notifyLayout: false)
             showNotice("已开启 \(minutes) 分钟免弹窗专注模式（后台仍自动收录）")
         }
+        onStatusItemNeedsUpdate?()
         onLayoutNeedsUpdate?(true)
     }
 
@@ -227,16 +278,26 @@ final class MessageStore: ObservableObject {
         if !mutedRules.contains(rule) {
             mutedRules.append(rule)
         }
+        let removedActive = items.filter { $0.appId == item.appId && $0.sender == item.sender }
         items.removeAll { $0.appId == item.appId && $0.sender == item.sender }
+        suppressedMutedItems.removeAll { $0.appId == item.appId && $0.sender == item.sender }
         savePersistedState()
-        presentUndo(UndoSnapshot(item: item, mutedRule: rule, label: "已屏蔽「\(item.sender)」"))
+        presentUndo(
+            UndoSnapshot(
+                items: removedActive,
+                mutedRule: rule,
+                label: "已永久屏蔽「\(item.sender)」"
+            )
+        )
+        onStatusItemNeedsUpdate?()
         onLayoutNeedsUpdate?(true)
     }
 
     func removeMutedRule(_ rule: MutedConversationRule) {
         mutedRules.removeAll { $0 == rule }
         savePersistedState()
-        onMonitoredAppsChanged?(monitoredApps) // Trigger fresh scan
+        onMonitoredAppsChanged?(monitoredApps)
+        onStatusItemNeedsUpdate?()
         onLayoutNeedsUpdate?(true)
     }
 
@@ -254,8 +315,10 @@ final class MessageStore: ObservableObject {
         let current = Date()
         now = current
 
+        var statusChanged = false
         if let pUntil = pausePeeksUntil, current >= pUntil {
             pausePeeksUntil = nil
+            statusChanged = true
         }
 
         var wokeUpSnooze = false
@@ -267,8 +330,9 @@ final class MessageStore: ObservableObject {
         }
 
         checkAndTriggerOverduePeek(at: current)
-        if wokeUpSnooze {
-            savePersistedState()
+        if wokeUpSnooze || statusChanged {
+            if wokeUpSnooze { savePersistedState() }
+            onStatusItemNeedsUpdate?()
             onLayoutNeedsUpdate?(true)
         }
     }
@@ -288,6 +352,18 @@ final class MessageStore: ObservableObject {
         let enabledIds = Set(enabledApps.map(\.id))
         return items.filter { enabledIds.contains($0.appId) && $0.isSnoozed(at: now) }
             .sorted { ($0.snoozedUntil ?? .distantFuture) < ($1.snoozedUntil ?? .distantFuture) }
+    }
+
+    var displayedSuppressedMutedItems: [MessageItem] {
+        guard autoFilterMutedChats, !showSnoozedSheet else { return [] }
+        let enabledIds = Set(enabledApps.map(\.id))
+        let base = suppressedMutedItems.filter {
+            enabledIds.contains($0.appId) && !isMuted(appId: $0.appId, sender: $0.sender)
+        }
+        if let filterId = selectedFilterAppId {
+            return base.filter { $0.appId == filterId }
+        }
+        return base
     }
 
     var displayedQueueItems: [MessageItem] {
@@ -362,6 +438,34 @@ final class MessageStore: ObservableObject {
         snooze(list[selectedKeyboardIndex], minutes: 15)
     }
 
+    func triggerKeyboardToggleBody() {
+        let list = displayedQueueItems
+        guard selectedKeyboardIndex >= 0, selectedKeyboardIndex < list.count else { return }
+        toggleExpandedBody(for: list[selectedKeyboardIndex].id)
+    }
+
+    func toggleExpandedBody(for itemId: String) {
+        if expandedBodyItemId == itemId {
+            expandedBodyItemId = nil
+        } else {
+            expandedBodyItemId = itemId
+        }
+        onLayoutNeedsUpdate?(true)
+    }
+
+    // MARK: - FIFO Handled Revisions Tracking
+
+    private func recordHandledRevision(id: String, revision: String) {
+        handledRevisions[id] = revision
+        handledRevisionOrder.removeAll { $0 == id }
+        handledRevisionOrder.append(id)
+    }
+
+    private func removeHandledRevision(id: String) {
+        handledRevisions.removeValue(forKey: id)
+        handledRevisionOrder.removeAll { $0 == id }
+    }
+
     // MARK: - 1. Ingest System / Notifier Deliveries
 
     func ingestNotifications(_ batch: [UserNotedWatcher.RawNotification], isStartupBackfill: Bool) {
@@ -376,8 +480,12 @@ final class MessageStore: ObservableObject {
             let targetApp = app(for: raw.appId)
             guard targetApp.isEnabled else { continue }
 
-            if isStartupBackfill, dockBadges[targetApp.id] == .clear {
-                continue
+            // Never backfill old notifications if Dock says 0 unread
+            if isStartupBackfill {
+                let dock = dockBadges[targetApp.id] ?? .unavailable
+                if dock == .clear || dock == .unavailable {
+                    continue
+                }
             }
 
             let sender = raw.title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -386,26 +494,45 @@ final class MessageStore: ObservableObject {
 
             let sub = raw.subtitle.trimmingCharacters(in: .whitespacesAndNewlines)
             let body = raw.body.trimmingCharacters(in: .whitespacesAndNewlines)
+            let mention = AccessibilityBridge.containsMentionBreakthrough(body)
+                || AccessibilityBridge.containsMentionBreakthrough(resolvedSender)
+                || AccessibilityBridge.containsMentionBreakthrough(sub)
 
-            let convKey = canonicalConversationId(appId: targetApp.id, tenant: nil, sender: resolvedSender)
+            let defaultConvKey = canonicalConversationId(appId: targetApp.id, tenant: nil, sender: resolvedSender)
             let revision = "\(recKey)|\(body)"
-            if handledRevisions[convKey] == revision { continue }
+
+            // Reuse existing tenant-scoped conversation if already present in queue (prevents split-brain duplicates)
+            let existingIdx = items.firstIndex(where: { $0.id == defaultConvKey })
+                ?? items.firstIndex(where: {
+                    $0.appId == targetApp.id
+                        && $0.sender == resolvedSender
+                        && $0.sourceKind != .tenantHint
+                        && $0.sourceKind != .dockHint
+                })
+
+            let checkKey = existingIdx.map { items[$0].id } ?? defaultConvKey
+            if handledRevisions[checkKey] == revision || handledRevisions[defaultConvKey] == revision {
+                continue
+            }
 
             items.removeAll { $0.appId == targetApp.id && $0.sourceKind == .dockHint }
 
-            if let existingIdx = items.firstIndex(where: { $0.id == convKey }) {
-                items[existingIdx].body = body.isEmpty ? items[existingIdx].body : body
-                if !sub.isEmpty { items[existingIdx].subtitle = sub }
-                if raw.deliveredAt > items[existingIdx].latestActivityAt {
-                    items[existingIdx].latestActivityAt = raw.deliveredAt
+            if let idx = existingIdx {
+                items[idx].body = body.isEmpty ? items[idx].body : body
+                if !sub.isEmpty && items[idx].subtitle.isEmpty {
+                    items[idx].subtitle = sub
                 }
-                items[existingIdx].contentRevision = revision
-                items[existingIdx].snoozedUntil = nil
-                addedNewest = items[existingIdx]
+                if mention { items[idx].hasMentionBreakthrough = true }
+                if raw.deliveredAt > items[idx].latestActivityAt {
+                    items[idx].latestActivityAt = raw.deliveredAt
+                }
+                items[idx].contentRevision = revision
+                items[idx].snoozedUntil = nil
+                addedNewest = items[idx]
                 mutated = true
             } else {
                 let entry = MessageItem(
-                    id: convKey,
+                    id: defaultConvKey,
                     appId: targetApp.id,
                     bundleId: targetApp.primaryBundleId,
                     tenantName: nil,
@@ -413,6 +540,7 @@ final class MessageStore: ObservableObject {
                     subtitle: sub,
                     body: body.isEmpty ? "发来一条新消息" : body,
                     unreadBadgeText: nil,
+                    hasMentionBreakthrough: mention,
                     firstObservedAt: raw.deliveredAt,
                     latestActivityAt: raw.deliveredAt,
                     isTimestampExact: true,
@@ -430,6 +558,7 @@ final class MessageStore: ObservableObject {
         guard mutated else { return }
         now = Date()
         savePersistedState()
+        onStatusItemNeedsUpdate?()
 
         if !isStartupBackfill, let newest = addedNewest, !isExpanded, !isPeeksPaused {
             presentPeek(.incoming(newest), durationSeconds: 4.4)
@@ -438,7 +567,58 @@ final class MessageStore: ObservableObject {
         }
     }
 
-    // MARK: - 2. Reconcile Live AX World
+    // MARK: - 2. 5-Layer Muted Chat Classifier & Live AX World Reconciliation
+
+    private func classifyAttention(
+        for snap: ConversationSnapshot,
+        app targetApp: MonitoredApp,
+        dock: DockBadgeReading,
+        current: Date
+    ) -> ConversationAttentionKind {
+        // Layer 1: Explicit @我 / @所有人 / urgent mention ALWAYS breaks through into primary queue!
+        if snap.hasMentionBreakthrough {
+            return .mentionedInMuted
+        }
+
+        guard autoFilterMutedChats else {
+            return .directOrUnmuted
+        }
+
+        // Layer 2: Explicit mute icon/DOM class, noise aggregator folder (折叠的群聊/免打扰/订阅号),
+        // leading `[14条]` muted count prefix, or non-numeric dot-only sidebar indicator (`•`)
+        if snap.hasExplicitMuteSignal {
+            return .mutedNoise
+        }
+
+        // Layer 3: macOS Dock Truth Anchor == 0 (`clear`)
+        // IM apps exclude muted chats from their Dock AXStatusLabel. When Dock is clear, any lingering
+        // sidebar unread count without `@我` (unless a brand-new <4s banner just arrived) is a muted chat!
+        if dock == .clear {
+            let hasFreshLiveBanner = items.contains { existing in
+                existing.appId == snap.appId
+                    && existing.sender == snap.title
+                    && existing.sourceKind == .notification
+                    && current.timeIntervalSince(existing.latestActivityAt) < 4.0
+            }
+            if !hasFreshLiveBanner {
+                return .mutedNoise
+            }
+        }
+
+        // Layer 4: Mathematical Upper-Bound vs Unmuted Dock Total
+        // For apps that sum unmuted messages in Dock (Feishu, WeChat, QQ, DingTalk, WeCom, Telegram, Mail),
+        // any single group row with unread count strictly greater than the entire app's Dock badge MUST be muted!
+        if targetApp.sumsUnreadInDockBadge, case .count(let dockTotal) = dock {
+            if let rowCount = snap.badgeIntValue, rowCount > dockTotal {
+                return .mutedNoise
+            }
+            if snap.badgeText.contains("+") && dockTotal < 99 {
+                return .mutedNoise
+            }
+        }
+
+        return .directOrUnmuted
+    }
 
     func reconcileAXObservation(_ obs: AXWorldObservation) {
         let prevTrust = hasAccessibilityPermission
@@ -448,28 +628,43 @@ final class MessageStore: ObservableObject {
         now = current
 
         guard obs.trusted else {
-            if mutated { onLayoutNeedsUpdate?(true) }
+            if mutated {
+                onStatusItemNeedsUpdate?()
+                onLayoutNeedsUpdate?(true)
+            }
             return
         }
 
-        let prevDock = previousDockBadges
+        let prevHadPresence = hasUnresolvedAggregatePresence
         dockBadges = obs.dockBadges
-        previousDockBadges = obs.dockBadges
 
-        // A. Live System NotificationCenter & Helper Banners
+        // A. Live System NotificationCenter & Helper Banners (Muted chats never fire OS banners unless @mentioned!)
         for banner in obs.liveSystemBanners {
             let targetApp = app(for: banner.appId)
             guard targetApp.isEnabled, !isMuted(appId: banner.appId, sender: banner.title) else { continue }
+            guard !AccessibilityBridge.isNoiseAggregatorFolder(banner.title) else { continue }
 
-            let convId = canonicalConversationId(appId: banner.appId, tenant: banner.tenantName, sender: banner.title)
+            let defaultConvId = canonicalConversationId(appId: banner.appId, tenant: banner.tenantName, sender: banner.title)
             let rev = "banner|\(banner.appId)|\(banner.title)|\(banner.preview)"
-            guard handledRevisions[convId] != rev else { continue }
+
+            // Reuse tenant-scoped item if already tracked for the same sender
+            let existingIdx = items.firstIndex(where: { $0.id == defaultConvId })
+                ?? items.firstIndex(where: {
+                    $0.appId == banner.appId
+                        && $0.sender == banner.title
+                        && $0.sourceKind != .tenantHint
+                        && $0.sourceKind != .dockHint
+                })
+
+            let checkId = existingIdx.map { items[$0].id } ?? defaultConvId
+            guard handledRevisions[checkId] != rev && handledRevisions[defaultConvId] != rev else { continue }
 
             items.removeAll { $0.appId == banner.appId && $0.sourceKind == .dockHint }
 
-            if let idx = items.firstIndex(where: { $0.id == convId }) {
+            if let idx = existingIdx {
                 if items[idx].contentRevision != rev {
                     items[idx].body = banner.preview
+                    if banner.hasMentionBreakthrough { items[idx].hasMentionBreakthrough = true }
                     items[idx].latestActivityAt = current
                     items[idx].contentRevision = rev
                     items[idx].snoozedUntil = nil
@@ -478,7 +673,7 @@ final class MessageStore: ObservableObject {
                 }
             } else {
                 let item = MessageItem(
-                    id: convId,
+                    id: defaultConvId,
                     appId: banner.appId,
                     bundleId: targetApp.primaryBundleId,
                     tenantName: banner.tenantName,
@@ -486,6 +681,7 @@ final class MessageStore: ObservableObject {
                     subtitle: banner.tenantName ?? "",
                     body: banner.preview,
                     unreadBadgeText: banner.badgeText,
+                    hasMentionBreakthrough: banner.hasMentionBreakthrough,
                     firstObservedAt: current,
                     latestActivityAt: current,
                     isTimestampExact: true,
@@ -500,16 +696,85 @@ final class MessageStore: ObservableObject {
             }
         }
 
-        // B. Visible Sidebar Unread Conversations
-        var observedConvIdsByApp: [String: Set<String>] = [:]
+        // B. Visible Sidebar Unread Conversations (With 5-Layer Muted Chat Filtering + Tenant Deduplication)
+        var observedActiveConvIdsByApp: [String: Set<String>] = [:]
+        var observedActiveSendersByApp: [String: Set<String>] = [:]
+        var nextSuppressedMuted: [MessageItem] = []
         var newestSidebarArrival: MessageItem? = nil
 
         for snap in obs.conversations {
             let targetApp = app(for: snap.appId)
             guard targetApp.isEnabled, !isMuted(appId: snap.appId, sender: snap.title) else { continue }
 
+            let dock = obs.dockBadges[snap.appId] ?? .unavailable
+            let attention = classifyAttention(for: snap, app: targetApp, dock: dock, current: current)
             let convId = canonicalConversationId(appId: snap.appId, tenant: snap.tenantName, sender: snap.title)
-            observedConvIdsByApp[snap.appId, default: []].insert(convId)
+
+            if attention == .mutedNoise {
+                // Keep out of active queue & NEVER mark handledRevisions so a future @我 immediately promotes!
+                let beforeCount = items.count
+                items.removeAll {
+                    ($0.id == convId || ($0.appId == snap.appId && $0.tenantName == nil && $0.sender == snap.title))
+                        && $0.sourceKind == .sidebarSnapshot
+                }
+                if items.count != beforeCount { mutated = true }
+
+                let prevSuppressed = suppressedMutedItems.first { $0.id == convId }
+                let mutedEntry = MessageItem(
+                    id: convId,
+                    appId: snap.appId,
+                    bundleId: targetApp.primaryBundleId,
+                    tenantName: snap.tenantName,
+                    sender: snap.title,
+                    subtitle: snap.tenantName ?? "免打扰",
+                    body: snap.preview,
+                    unreadBadgeText: snap.badgeText == "有未读" ? nil : snap.badgeText,
+                    hasMentionBreakthrough: false,
+                    firstObservedAt: prevSuppressed?.firstObservedAt ?? current,
+                    latestActivityAt: current,
+                    isTimestampExact: false,
+                    snoozedUntil: nil,
+                    sourceKind: .sidebarSnapshot,
+                    lastNotifiedOverdueAt: nil,
+                    contentRevision: "muted|\(snap.badgeText)|\(snap.preview)"
+                )
+                nextSuppressedMuted.append(mutedEntry)
+                continue
+            }
+
+            let isMention = (attention == .mentionedInMuted) || snap.hasMentionBreakthrough
+            observedActiveConvIdsByApp[snap.appId, default: []].insert(convId)
+            observedActiveSendersByApp[snap.appId, default: []].insert(snap.title)
+
+            // Merge unscoped notification item into tenant-scoped conversation if needed
+            if let tenant = snap.tenantName, !tenant.isEmpty {
+                let unscopedId = canonicalConversationId(appId: snap.appId, tenant: nil, sender: snap.title)
+                if unscopedId != convId,
+                   !items.contains(where: { $0.id == convId }),
+                   let uIdx = items.firstIndex(where: { $0.id == unscopedId }) {
+                    let old = items[uIdx]
+                    let upgraded = MessageItem(
+                        id: convId,
+                        appId: old.appId,
+                        bundleId: old.bundleId,
+                        tenantName: tenant,
+                        sender: old.sender,
+                        subtitle: tenant,
+                        body: snap.preview,
+                        unreadBadgeText: snap.badgeText,
+                        hasMentionBreakthrough: old.hasMentionBreakthrough || isMention,
+                        firstObservedAt: old.firstObservedAt,
+                        latestActivityAt: old.latestActivityAt,
+                        isTimestampExact: old.isTimestampExact,
+                        snoozedUntil: old.snoozedUntil,
+                        sourceKind: .sidebarSnapshot,
+                        lastNotifiedOverdueAt: old.lastNotifiedOverdueAt,
+                        contentRevision: "ax|\(snap.badgeText)|\(snap.preview)"
+                    )
+                    items[uIdx] = upgraded
+                    mutated = true
+                }
+            }
 
             let rev = "ax|\(snap.badgeText)|\(snap.preview)"
             if handledRevisions[convId] == rev { continue }
@@ -517,10 +782,12 @@ final class MessageStore: ObservableObject {
             items.removeAll { $0.appId == snap.appId && $0.sourceKind == .dockHint }
 
             if let idx = items.firstIndex(where: { $0.id == convId }) {
-                if items[idx].contentRevision != rev {
+                if items[idx].contentRevision != rev || items[idx].hasMentionBreakthrough != isMention {
                     let prevBadge = items[idx].unreadBadgeText
                     items[idx].body = snap.preview
                     items[idx].unreadBadgeText = snap.badgeText
+                    items[idx].hasMentionBreakthrough = isMention
+                    items[idx].sourceKind = .sidebarSnapshot
                     if let t = snap.tenantName, !t.isEmpty {
                         items[idx].tenantName = t
                         items[idx].subtitle = t
@@ -543,6 +810,7 @@ final class MessageStore: ObservableObject {
                     subtitle: snap.tenantName ?? "",
                     body: snap.preview,
                     unreadBadgeText: snap.badgeText,
+                    hasMentionBreakthrough: isMention,
                     firstObservedAt: current,
                     latestActivityAt: current,
                     isTimestampExact: false,
@@ -557,18 +825,38 @@ final class MessageStore: ObservableObject {
             }
         }
 
+        // Retire read conversations ONLY within the currently active tenant's visible sidebar
         for appId in obs.readableSidebarAppIds {
-            let visibleIds = observedConvIdsByApp[appId] ?? []
+            let visibleIds = observedActiveConvIdsByApp[appId] ?? []
+            let visibleSenders = observedActiveSendersByApp[appId] ?? []
+            let activeTenant = obs.activeTenantByAppId[appId]
             var toRetire: Set<String> = []
-            for item in items where item.appId == appId && item.sourceKind == .sidebarSnapshot && !item.isSnoozed(at: current) {
-                if visibleIds.contains(item.id) {
-                    missingSidebarScanCounts[item.id] = 0
-                } else {
-                    let c = (missingSidebarScanCounts[item.id] ?? 0) + 1
-                    missingSidebarScanCounts[item.id] = c
-                    if c >= 2 {
-                        toRetire.insert(item.id)
-                        missingSidebarScanCounts.removeValue(forKey: item.id)
+
+            for item in items where item.appId == appId && !item.isSnoozed(at: current) {
+                let inCurrentTenantScope = (activeTenant == nil || item.tenantName == nil || item.tenantName == activeTenant)
+                guard inCurrentTenantScope else { continue }
+
+                if item.sourceKind == .sidebarSnapshot {
+                    if visibleIds.contains(item.id) {
+                        missingSidebarScanCounts[item.id] = 0
+                    } else {
+                        let c = (missingSidebarScanCounts[item.id] ?? 0) + 1
+                        missingSidebarScanCounts[item.id] = c
+                        if c >= 2 {
+                            toRetire.insert(item.id)
+                            missingSidebarScanCounts.removeValue(forKey: item.id)
+                        }
+                    }
+                } else if item.sourceKind == .notification && current.timeIntervalSince(item.latestActivityAt) > 6.5 {
+                    if visibleIds.contains(item.id) || visibleSenders.contains(item.sender) {
+                        missingSidebarScanCounts[item.id] = 0
+                    } else {
+                        let c = (missingSidebarScanCounts[item.id] ?? 0) + 1
+                        missingSidebarScanCounts[item.id] = c
+                        if c >= 3 {
+                            toRetire.insert(item.id)
+                            missingSidebarScanCounts.removeValue(forKey: item.id)
+                        }
                     }
                 }
             }
@@ -584,7 +872,43 @@ final class MessageStore: ObservableObject {
             let targetApp = app(for: hint.appId)
             guard targetApp.isEnabled, !isMuted(appId: hint.appId, sender: hint.tenantName) else { continue }
 
+            let dock = obs.dockBadges[hint.appId] ?? .unavailable
             let hintId = "tenant|\(hint.appId)|\(hint.tenantName)"
+
+            // Dot-only tenant indicator or Dock == clear means that workspace only has muted group chatter!
+            if autoFilterMutedChats && (hint.isDotOnly || dock == .clear) {
+                let prevSuppressed = suppressedMutedItems.first { $0.id == hintId }
+                nextSuppressedMuted.append(
+                    MessageItem(
+                        id: hintId,
+                        appId: hint.appId,
+                        bundleId: targetApp.primaryBundleId,
+                        tenantName: hint.tenantName,
+                        sender: hint.tenantName,
+                        subtitle: "\(targetApp.displayName)其他企业 · 免打扰",
+                        body: "该工作区仅有免打扰会话动态",
+                        unreadBadgeText: nil,
+                        hasMentionBreakthrough: false,
+                        firstObservedAt: prevSuppressed?.firstObservedAt ?? current,
+                        latestActivityAt: current,
+                        isTimestampExact: false,
+                        snoozedUntil: nil,
+                        sourceKind: .tenantHint,
+                        lastNotifiedOverdueAt: nil,
+                        contentRevision: "muted-tenant|\(hint.badgeText)"
+                    )
+                )
+                continue
+            }
+
+            // Don't show a generic tenant hint if we already hold specific unread conversation items for that tenant
+            let alreadyHasSpecificForTenant = items.contains {
+                $0.appId == hint.appId && $0.tenantName == hint.tenantName && $0.sourceKind != .tenantHint
+            }
+            if alreadyHasSpecificForTenant {
+                continue
+            }
+
             activeTenantHintIdsByApp[hint.appId, default: []].insert(hintId)
             let rev = "tenant|\(hint.badgeText)"
             if handledRevisions[hintId] == rev { continue }
@@ -594,7 +918,7 @@ final class MessageStore: ObservableObject {
             if let idx = items.firstIndex(where: { $0.id == hintId }) {
                 if items[idx].unreadBadgeText != hint.badgeText {
                     items[idx].unreadBadgeText = hint.badgeText
-                    items[idx].body = "该工作区有 \(hint.badgeText) 未读消息，点击直接切换查看"
+                    items[idx].body = "该工作区有 \(hint.badgeText) 条未读消息，点击直接切换查看"
                     items[idx].contentRevision = rev
                     items[idx].latestActivityAt = current
                     mutated = true
@@ -607,8 +931,9 @@ final class MessageStore: ObservableObject {
                     tenantName: hint.tenantName,
                     sender: hint.tenantName,
                     subtitle: "\(targetApp.displayName)其他企业",
-                    body: "该工作区有 \(hint.badgeText) 未读消息，点击直接切换查看",
+                    body: "该工作区有 \(hint.badgeText) 条未读消息，点击直接切换查看",
                     unreadBadgeText: hint.badgeText,
+                    hasMentionBreakthrough: false,
                     firstObservedAt: current,
                     latestActivityAt: current,
                     isTimestampExact: false,
@@ -630,25 +955,41 @@ final class MessageStore: ObservableObject {
             if items.count != before { mutated = true }
         }
 
+        // Update ephemeral suppressed muted items drawer cleanly
+        if suppressedMutedItems != nextSuppressedMuted {
+            suppressedMutedItems = nextSuppressedMuted
+            if nextSuppressedMuted.isEmpty && showMutedDrawer {
+                showMutedDrawer = false
+            }
+            if isExpanded {
+                onLayoutNeedsUpdate?(false)
+            }
+        }
+
         // D. Honest Dock Badge Clear & Fallback Coverage
         for monitored in enabledApps {
             let appId = monitored.id
             let reading = obs.dockBadges[appId] ?? .unavailable
-            let prevReading = prevDock[appId] ?? .unavailable
 
             switch reading {
             case .unavailable:
                 break
 
             case .clear:
+                // Whenever Dock AXStatusLabel is clear (0), remove dock hints and any stale (>3.5s) non-snoozed
+                // notifications/rows without @我 — even on the very first startup scan!
                 let before = items.count
-                items.removeAll { $0.appId == appId && $0.sourceKind == .dockHint }
-                if prevReading.hasUnread {
-                    items.removeAll {
-                        $0.appId == appId
-                            && $0.sourceKind == .notification
-                            && !$0.isSnoozed(at: current)
+                items.removeAll { item in
+                    guard item.appId == appId, item.sourceKind != .demo, !item.isSnoozed(at: current) else {
+                        return false
                     }
+                    if item.sourceKind == .dockHint || item.sourceKind == .tenantHint {
+                        return true
+                    }
+                    if item.hasMentionBreakthrough {
+                        return false
+                    }
+                    return current.timeIntervalSince(item.latestActivityAt) >= 3.5
                 }
                 if items.count != before { mutated = true }
 
@@ -664,8 +1005,8 @@ final class MessageStore: ObservableObject {
                     if handledRevisions[dockId] == rev { continue }
 
                     let desc = monitored.supportsTenantRail
-                        ? "检测到角标（\(reading.displayText)），展开\(monitored.displayName)窗口可读取具体会话"
-                        : "检测到未读角标（\(reading.displayText)），点击打开\(monitored.displayName)"
+                        ? "检测到角标（\(reading.displayText)），展开\(monitored.displayName)窗口可自动定位具体会话"
+                        : "检测到未读角标（\(reading.displayText)），点击打开\(monitored.displayName)查看"
 
                     if let idx = items.firstIndex(where: { $0.id == dockId }) {
                         if items[idx].unreadBadgeText != reading.displayText {
@@ -684,6 +1025,7 @@ final class MessageStore: ObservableObject {
                             subtitle: "角标提醒",
                             body: desc,
                             unreadBadgeText: reading.displayText,
+                            hasMentionBreakthrough: false,
                             firstObservedAt: current,
                             latestActivityAt: current,
                             isTimestampExact: false,
@@ -699,8 +1041,10 @@ final class MessageStore: ObservableObject {
             }
         }
 
-        if mutated {
-            savePersistedState()
+        let presenceChanged = (prevHadPresence != hasUnresolvedAggregatePresence)
+        if mutated || presenceChanged {
+            if mutated { savePersistedState() }
+            onStatusItemNeedsUpdate?()
             if let arrival = newestSidebarArrival, !isExpanded, activePeek == nil, !isPeeksPaused {
                 presentPeek(.incoming(arrival), durationSeconds: 4.2)
             } else {
@@ -764,10 +1108,22 @@ final class MessageStore: ObservableObject {
         if item.sourceKind == .demo {
             let outcome = onJumpRequested?(item, appObj) ?? .appActivatedNeedsConfirm
             completeItem(item, undoLabel: outcome.feedbackText(appName: appObj.displayName))
+            if isExpanded && !isPinnedExpanded {
+                collapsePanel()
+            }
             return
         }
 
         let outcome = onJumpRequested?(item, appObj) ?? .appActivatedNeedsConfirm
+        let isFromMutedDrawer = suppressedMutedItems.contains(where: { $0.id == item.id })
+
+        if isFromMutedDrawer {
+            if isExpanded && !isPinnedExpanded {
+                collapsePanel()
+            }
+            return
+        }
+
         if outcome.resolvedConversationDirectly {
             completeItem(item, undoLabel: "已定位「\(item.sender)」")
         } else {
@@ -776,17 +1132,23 @@ final class MessageStore: ObservableObject {
                 dismissPeek()
             }
         }
+
+        if isExpanded && !isPinnedExpanded {
+            collapsePanel()
+        }
     }
 
     func completeItem(_ item: MessageItem, undoLabel: String? = nil) {
         items.removeAll { $0.id == item.id }
-        handledRevisions[item.id] = item.contentRevision
+        if expandedBodyItemId == item.id { expandedBodyItemId = nil }
+        recordHandledRevision(id: item.id, revision: item.contentRevision)
         savePersistedState()
 
         if case .incoming(let peekItem) = activePeek, peekItem.id == item.id {
             dismissPeek(notifyLayout: false)
         }
-        presentUndo(UndoSnapshot(item: item, mutedRule: nil, label: undoLabel ?? "已完成「\(item.sender)」"))
+        presentUndo(UndoSnapshot(items: [item], mutedRule: nil, label: undoLabel ?? "已完成「\(item.sender)」"))
+        onStatusItemNeedsUpdate?()
         onLayoutNeedsUpdate?(true)
     }
 
@@ -794,12 +1156,40 @@ final class MessageStore: ObservableObject {
         guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
         items[idx].snoozedUntil = Date().addingTimeInterval(TimeInterval(minutes * 60))
         items[idx].lastNotifiedOverdueAt = nil
+        if expandedBodyItemId == item.id { expandedBodyItemId = nil }
         savePersistedState()
 
         if case .incoming(let peekItem) = activePeek, peekItem.id == item.id {
             dismissPeek(notifyLayout: false)
         }
-        showNotice("已稍后提醒（\(minutes)m）：\(item.sender)")
+        let durationText = minutes >= 60 ? "\(minutes / 60) 小时" : "\(minutes) 分钟"
+        showNotice("已稍后提醒（\(durationText)）：\(item.sender)")
+        onStatusItemNeedsUpdate?()
+        onLayoutNeedsUpdate?(true)
+    }
+
+    func snoozeUntilTomorrowMorning(_ item: MessageItem) {
+        guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
+        let cal = Calendar.current
+        let current = Date()
+        var comps = cal.dateComponents([.year, .month, .day], from: current)
+        comps.hour = 9
+        comps.minute = 30
+        comps.second = 0
+        var target = cal.date(from: comps) ?? current.addingTimeInterval(12 * 3600)
+        if target.timeIntervalSince(current) < 3600 {
+            target = cal.date(byAdding: .day, value: 1, to: target) ?? current.addingTimeInterval(14 * 3600)
+        }
+        items[idx].snoozedUntil = target
+        items[idx].lastNotifiedOverdueAt = nil
+        if expandedBodyItemId == item.id { expandedBodyItemId = nil }
+        savePersistedState()
+
+        if case .incoming(let peekItem) = activePeek, peekItem.id == item.id {
+            dismissPeek(notifyLayout: false)
+        }
+        showNotice("已延后至明早 09:30：\(item.sender)")
+        onStatusItemNeedsUpdate?()
         onLayoutNeedsUpdate?(true)
     }
 
@@ -810,22 +1200,32 @@ final class MessageStore: ObservableObject {
         if let rule = snap.mutedRule {
             mutedRules.removeAll { $0 == rule }
         }
-        handledRevisions.removeValue(forKey: snap.item.id)
-        if !items.contains(where: { $0.id == snap.item.id }) {
-            items.append(snap.item)
+        for restored in snap.items {
+            removeHandledRevision(id: restored.id)
+            if !items.contains(where: { $0.id == restored.id }) {
+                items.append(restored)
+            }
         }
         savePersistedState()
+        if snap.mutedRule != nil {
+            onMonitoredAppsChanged?(monitoredApps)
+        }
+        onStatusItemNeedsUpdate?()
         onLayoutNeedsUpdate?(true)
     }
 
     func clearVisibleCompleted() {
         let targets = displayedQueueItems
+        guard !targets.isEmpty else { return }
         for t in targets {
-            handledRevisions[t.id] = t.contentRevision
+            recordHandledRevision(id: t.id, revision: t.contentRevision)
         }
         let ids = Set(targets.map(\.id))
         items.removeAll { ids.contains($0.id) }
+        expandedBodyItemId = nil
         savePersistedState()
+        presentUndo(UndoSnapshot(items: targets, mutedRule: nil, label: "已将 \(targets.count) 项全部标为已阅"))
+        onStatusItemNeedsUpdate?()
         onLayoutNeedsUpdate?(true)
     }
 
@@ -837,6 +1237,18 @@ final class MessageStore: ObservableObject {
             dismissPeek(notifyLayout: false)
         } else {
             showSettings = false
+            showMutedDrawer = false
+            expandedBodyItemId = nil
+        }
+        onLayoutNeedsUpdate?(true)
+    }
+
+    func expandPanelAndFocus() {
+        if !isExpanded {
+            isExpanded = true
+            selectedKeyboardIndex = 0
+            showSnoozedSheet = false
+            dismissPeek(notifyLayout: false)
         }
         onLayoutNeedsUpdate?(true)
     }
@@ -845,6 +1257,8 @@ final class MessageStore: ObservableObject {
         guard isExpanded else { return }
         isExpanded = false
         showSettings = false
+        showMutedDrawer = false
+        expandedBodyItemId = nil
         onLayoutNeedsUpdate?(true)
     }
 
@@ -888,7 +1302,7 @@ final class MessageStore: ObservableObject {
         undoDismissTask?.cancel()
         undoBanner = snapshot
         undoDismissTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            try? await Task.sleep(nanoseconds: 5_500_000_000)
             guard !Task.isCancelled else { return }
             self?.undoBanner = nil
             self?.onLayoutNeedsUpdate?(true)
@@ -932,21 +1346,32 @@ final class MessageStore: ObservableObject {
         }
         self.items = decoded.items.filter { $0.sourceKind != .demo }
         self.handledRevisions = decoded.handledRevisions
+        if let savedOrder = decoded.handledRevisionOrder, !savedOrder.isEmpty {
+            self.handledRevisionOrder = savedOrder.filter { decoded.handledRevisions[$0] != nil }
+        } else {
+            self.handledRevisionOrder = Array(decoded.handledRevisions.keys)
+        }
         self.seenNotificationKeys = Set(decoded.seenNotificationKeys.suffix(400))
         self.mutedRules = decoded.mutedRules
     }
 
     private func savePersistedState() {
-        if handledRevisions.count > 300 {
-            let keysToKeep = Array(handledRevisions.keys.prefix(200))
+        if handledRevisionOrder.count > 300 || handledRevisions.count > 300 {
+            let keepOrder = Array(handledRevisionOrder.suffix(220))
             var trimmed: [String: String] = [:]
-            for k in keysToKeep { trimmed[k] = handledRevisions[k] }
+            for k in keepOrder {
+                if let val = handledRevisions[k] {
+                    trimmed[k] = val
+                }
+            }
             handledRevisions = trimmed
+            handledRevisionOrder = keepOrder.filter { trimmed[$0] != nil }
         }
         let nonDemoItems = items.filter { $0.sourceKind != .demo }
         let state = PersistedQueueState(
             items: nonDemoItems,
             handledRevisions: handledRevisions,
+            handledRevisionOrder: handledRevisionOrder,
             seenNotificationKeys: Array(seenNotificationKeys.suffix(400)),
             mutedRules: mutedRules
         )
@@ -968,8 +1393,9 @@ final class MessageStore: ObservableObject {
             tenantName: "主业A公司",
             sender: "张总",
             subtitle: "主业A公司",
-            body: "@你 下午客户演示环境好了吗？看到回一下",
+            body: "@你 下午客户演示环境好了吗？看到回一下，顺便把最新接口变更清单发群里",
             unreadBadgeText: "2",
+            hasMentionBreakthrough: true,
             firstObservedAt: nowDate.addingTimeInterval(-19 * 60),
             latestActivityAt: nowDate.addingTimeInterval(-19 * 60),
             isTimestampExact: true,
@@ -985,8 +1411,9 @@ final class MessageStore: ObservableObject {
             tenantName: nil,
             sender: "王工（合作方）",
             subtitle: "",
-            body: "合同盖章扫描件发你了，麻烦确认下收件信息",
+            body: "合同盖章扫描件发你了，麻烦确认下收件信息与发票抬头是否正确",
             unreadBadgeText: "1",
+            hasMentionBreakthrough: false,
             firstObservedAt: nowDate.addingTimeInterval(-8 * 60),
             latestActivityAt: nowDate.addingTimeInterval(-8 * 60),
             isTimestampExact: true,
@@ -1004,6 +1431,7 @@ final class MessageStore: ObservableObject {
             subtitle: "",
             body: "阿哲：测试机包已经打好了，随时可以拉取验证",
             unreadBadgeText: "3",
+            hasMentionBreakthrough: false,
             firstObservedAt: nowDate.addingTimeInterval(-25),
             latestActivityAt: nowDate.addingTimeInterval(-25),
             isTimestampExact: true,
@@ -1015,6 +1443,7 @@ final class MessageStore: ObservableObject {
 
         items.append(contentsOf: [demoA, demoB, demoQQ])
         now = nowDate
+        onStatusItemNeedsUpdate?()
         if !isExpanded {
             presentPeek(.incoming(demoQQ), durationSeconds: 4.5)
         } else {

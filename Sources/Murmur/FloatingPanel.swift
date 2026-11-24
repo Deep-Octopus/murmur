@@ -27,7 +27,8 @@ final class FloatingPanelController: NSObject {
     let panel: NonActivatingPanel
     private let store: MessageStore
     private var hostingView: NSHostingView<OrbRootView>!
-    private var eventMonitor: Any?
+    private var localEventMonitor: Any?
+    private var globalMouseMonitor: Any?
     private var screenObserver: NSObjectProtocol?
 
     private var hotKeyRef: EventHotKeyRef?
@@ -37,6 +38,7 @@ final class FloatingPanelController: NSObject {
     private var anchorY: CGFloat = 0
     private(set) var alignRight: Bool = true
     private(set) var alignTop: Bool = true
+    private(set) var lastOutsideAutoCollapseTime: CFTimeInterval = 0
 
     private var pendingLayoutUpdate = false
     private var pendingAnimateFlag = false
@@ -65,7 +67,7 @@ final class FloatingPanelController: NSObject {
         panel.isMovableByWindowBackground = false
 
         restoreOrPlaceInitialAnchor()
-        applyWindowConfig(bringToFront: true)
+        applyWindowConfig(bringToFront: false)
 
         let rootView = OrbRootView(store: store)
         let hosting = NSHostingView(rootView: rootView)
@@ -76,10 +78,7 @@ final class FloatingPanelController: NSObject {
 
         store.onLayoutNeedsUpdate = { [weak self] animated in
             guard let self else { return }
-            if !self.store.isExpanded && self.panel.allowBecomeKey {
-                self.panel.allowBecomeKey = false
-                self.panel.resignKey()
-            }
+            self.syncKeyWindowState()
             self.scheduleFrameUpdate(animated: animated)
         }
         store.onWindowConfigChanged = { [weak self] in
@@ -98,8 +97,11 @@ final class FloatingPanelController: NSObject {
     }
 
     deinit {
-        if let monitor = eventMonitor {
+        if let monitor = localEventMonitor {
             NSEvent.removeMonitor(monitor)
+        }
+        if let gMonitor = globalMouseMonitor {
+            NSEvent.removeMonitor(gMonitor)
         }
         if let obs = screenObserver {
             NotificationCenter.default.removeObserver(obs)
@@ -112,7 +114,20 @@ final class FloatingPanelController: NSObject {
         }
     }
 
-    // MARK: - Carbon Global HotKey (`⌥ Option + M` — Zero Input Monitoring TCC Prompt!)
+    private func syncKeyWindowState() {
+        if store.isExpanded {
+            if !panel.allowBecomeKey || !panel.isKeyWindow {
+                panel.allowBecomeKey = true
+                panel.orderFrontRegardless()
+                panel.makeKey()
+            }
+        } else if panel.allowBecomeKey {
+            panel.allowBecomeKey = false
+            panel.resignKey()
+        }
+    }
+
+    // MARK: - Carbon Global HotKey (Zero Input Monitoring TCC Prompt!)
 
     func applyGlobalHotKey(enabled: Bool) {
         if let hk = hotKeyRef {
@@ -120,7 +135,10 @@ final class FloatingPanelController: NSObject {
             hotKeyRef = nil
         }
 
-        guard enabled else { return }
+        guard enabled else {
+            store.hotKeyConflictError = false
+            return
+        }
 
         if hotKeyHandlerRef == nil {
             var eventType = EventTypeSpec(
@@ -141,27 +159,32 @@ final class FloatingPanelController: NSObject {
             self?.toggleViaKeyboardSession()
         }
 
-        let hotKeyID = EventHotKeyID(signature: OSType(0x4D4F5242), id: 1) // 'MORB'
-        RegisterEventHotKey(
-            UInt32(kVK_ANSI_M),
-            UInt32(optionKey),
+        let preset = store.hotKeyPreset
+        let hotKeyID = EventHotKeyID(signature: OSType(0x4D55524D), id: 1) // 'MURM'
+        let status = RegisterEventHotKey(
+            preset.keyCode,
+            preset.carbonModifiers,
             hotKeyID,
             GetApplicationEventTarget(),
             0,
             &hotKeyRef
         )
+        store.hotKeyConflictError = (status != noErr || hotKeyRef == nil)
     }
 
     func toggleViaKeyboardSession() {
         if store.isExpanded {
-            panel.allowBecomeKey = false
-            panel.resignKey()
             store.collapsePanel()
         } else {
-            store.toggleExpanded()
-            panel.allowBecomeKey = true
-            panel.orderFrontRegardless()
-            panel.makeKey()
+            store.expandPanelAndFocus()
+        }
+    }
+
+    func handleStatusBarLeftClick() {
+        if store.isExpanded {
+            store.collapsePanel()
+        } else if CACurrentMediaTime() - lastOutsideAutoCollapseTime > 0.32 {
+            store.expandPanelAndFocus()
         }
     }
 
@@ -266,7 +289,9 @@ final class FloatingPanelController: NSObject {
         recomputeAlignment(in: screen)
         persistAnchor(markUserPlaced: true)
         scheduleFrameUpdate(animated: true)
-        panel.orderFrontRegardless()
+        if !store.shouldHideDesktopOrb {
+            panel.orderFrontRegardless()
+        }
     }
 
     func applyWindowConfig(bringToFront: Bool) {
@@ -284,17 +309,19 @@ final class FloatingPanelController: NSObject {
             panel.level = .normal
             panel.collectionBehavior = [.moveToActiveSpace]
         }
-        if bringToFront {
+        if bringToFront && !store.shouldHideDesktopOrb {
             panel.orderFrontRegardless()
         }
     }
 
     func show() {
         performFrameUpdateNow(animated: false)
-        panel.orderFrontRegardless()
+        if !store.shouldHideDesktopOrb {
+            panel.orderFrontRegardless()
+        }
     }
 
-    // MARK: - Coalesced Smooth Spring Morphing
+    // MARK: - Coalesced Smooth Spring Morphing & Zero-Pixel Zen Mode
 
     func scheduleFrameUpdate(animated: Bool) {
         if animated { pendingAnimateFlag = true }
@@ -313,6 +340,14 @@ final class FloatingPanelController: NSObject {
 
     func performFrameUpdateNow(animated: Bool) {
         guard !isDraggingWindow else { return }
+
+        if store.shouldHideDesktopOrb {
+            if panel.isVisible {
+                panel.orderOut(nil)
+            }
+            return
+        }
+
         hostingView.layoutSubtreeIfNeeded()
         let intrinsic = hostingView.intrinsicContentSize
         let rawW = intrinsic.width > 0 ? intrinsic.width : hostingView.fittingSize.width
@@ -330,13 +365,22 @@ final class FloatingPanelController: NSObject {
         }
 
         let targetFrame = NSRect(x: originX, y: originY, width: width, height: height)
+        let wasVisible = panel.isVisible
+        if !wasVisible {
+            panel.setFrame(targetFrame, display: true, animate: false)
+            hostingView.frame = NSRect(x: 0, y: 0, width: width, height: height)
+            panel.orderFrontRegardless()
+            syncKeyWindowState()
+            return
+        }
+
         guard panel.frame != targetFrame else { return }
 
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        if animated && !reduceMotion && panel.isVisible {
+        if animated && !reduceMotion && wasVisible {
             hostingView.frame = NSRect(x: 0, y: 0, width: width, height: height)
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = store.isExpanded ? 0.25 : 0.20
+                ctx.duration = store.isExpanded ? 0.24 : 0.19
                 ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
                 panel.animator().setFrame(targetFrame, display: true)
             }
@@ -346,10 +390,10 @@ final class FloatingPanelController: NSObject {
         }
     }
 
-    // MARK: - Pointer Drag, Keyboard Triage & Context Menu
+    // MARK: - Pointer Drag, Click-Outside Dismiss, Keyboard Triage & Context Menu
 
     private func installEventMonitors() {
-        eventMonitor = NSEvent.addLocalMonitorForEvents(
+        localEventMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .rightMouseDown, .keyDown]
         ) { [weak self] event in
             guard let self else { return event }
@@ -359,15 +403,39 @@ final class FloatingPanelController: NSObject {
             guard event.window === self.panel else { return event }
             return self.handlePanelMouseEvent(event)
         }
+
+        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard self.store.isExpanded,
+                      !self.store.isPinnedExpanded,
+                      !self.store.isModalPickerOpen,
+                      !self.isDraggingWindow else { return }
+
+                let mouse = NSEvent.mouseLocation
+                if !self.panel.frame.contains(mouse) {
+                    self.lastOutsideAutoCollapseTime = CACurrentMediaTime()
+                    self.store.collapsePanel()
+                }
+            }
+        }
     }
 
     private func handleKeyDown(_ event: NSEvent) -> NSEvent? {
         guard store.isExpanded else { return event }
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+        if mods == .command && event.keyCode == 6 { // ⌘ + Z -> Undo
+            if store.undoBanner != nil {
+                store.undoLastAction()
+                return nil
+            }
+        }
 
         switch event.keyCode {
         case 53: // Esc
-            panel.allowBecomeKey = false
-            panel.resignKey()
             store.collapsePanel()
             return nil
         case 125: // Down arrow
@@ -380,10 +448,13 @@ final class FloatingPanelController: NSObject {
                 store.moveKeyboardSelection(delta: -1)
                 return nil
             }
+        case 49: // Space -> Quick-Look toggle full message body
+            if !store.showSettings && mods.isEmpty {
+                store.triggerKeyboardToggleBody()
+                return nil
+            }
         case 36, 76: // Return / Enter
             if !store.showSettings {
-                panel.allowBecomeKey = false
-                panel.resignKey()
                 store.triggerKeyboardOpen()
                 return nil
             }
@@ -393,7 +464,7 @@ final class FloatingPanelController: NSObject {
                 return nil
             }
         case 1: // 'S' -> snooze 15m
-            if !store.showSettings, event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty {
+            if !store.showSettings && mods.isEmpty {
                 store.triggerKeyboardSnooze()
                 return nil
             }
@@ -406,7 +477,6 @@ final class FloatingPanelController: NSObject {
     private func handlePanelMouseEvent(_ event: NSEvent) -> NSEvent? {
         switch event.type {
         case .rightMouseDown:
-            // Only pop panel-level menu on compact orb or header; let rows handle their own SwiftUI contextMenu!
             let loc = event.locationInWindow
             if store.surfaceMode == .compact || loc.y >= panel.frame.height - 48 {
                 let menu = buildControlMenu()
@@ -424,7 +494,7 @@ final class FloatingPanelController: NSObject {
                 store.isOrbPressed = true
             }
 
-            let inTopHeaderDragStrip = (loc.y >= winSize.height - 48) && (loc.x < winSize.width - 120)
+            let inTopHeaderDragStrip = (loc.y >= winSize.height - 48) && (loc.x < winSize.width - 148)
             let optionHeld = event.modifierFlags.contains(.option)
             let canDrag = (!store.lockOrbPosition || optionHeld) && (isCompact || inTopHeaderDragStrip)
 
@@ -531,9 +601,8 @@ final class FloatingPanelController: NSObject {
     func buildControlMenu() -> NSMenu {
         let menu = NSMenu()
 
-        let toggleTitle = store.enableGlobalHotkey
-            ? (store.isExpanded ? "收起待处理列表 (⌥M)" : "展开待处理列表 (⌥M)")
-            : (store.isExpanded ? "收起待处理列表" : "展开待处理列表")
+        let hkText = store.enableGlobalHotkey ? " (\(store.hotKeyPreset.displayLabel))" : ""
+        let toggleTitle = (store.isExpanded ? "收起待处理列表" : "展开待处理列表") + hkText
         let toggleItem = NSMenuItem(title: toggleTitle, action: #selector(menuToggleExpanded), keyEquivalent: "")
         toggleItem.target = self
         menu.addItem(toggleItem)
@@ -547,6 +616,15 @@ final class FloatingPanelController: NSObject {
         menu.addItem(settingsItem)
 
         menu.addItem(.separator())
+
+        let filterMutedItem = NSMenuItem(
+            title: "智能过滤免打扰会话（保留 @我 破圈）",
+            action: #selector(menuToggleFilterMuted),
+            keyEquivalent: ""
+        )
+        filterMutedItem.target = self
+        filterMutedItem.state = store.autoFilterMutedChats ? .on : .off
+        menu.addItem(filterMutedItem)
 
         // Focus / Meeting Pause
         if store.isPeeksPaused {
@@ -565,6 +643,17 @@ final class FloatingPanelController: NSObject {
             pauseParent.submenu = pauseSub
             menu.addItem(pauseParent)
         }
+
+        menu.addItem(.separator())
+
+        let zenItem = NSMenuItem(
+            title: "无待办时隐藏桌面胶囊（仅菜单栏显示）",
+            action: #selector(menuToggleHideWhenIdle),
+            keyEquivalent: ""
+        )
+        zenItem.target = self
+        zenItem.state = store.hideOrbWhenIdle ? .on : .off
+        menu.addItem(zenItem)
 
         // Window Level
         let levelSub = NSMenu()
@@ -635,24 +724,31 @@ final class FloatingPanelController: NSObject {
     }
 
     @objc private func menuToggleExpanded() {
-        store.toggleExpanded()
-        panel.orderFrontRegardless()
+        toggleViaKeyboardSession()
     }
 
     @objc private func menuOpenAppsManager() {
         store.isExpanded = true
         store.showSettings = true
         store.settingsTab = 0
+        syncKeyWindowState()
         scheduleFrameUpdate(animated: true)
-        panel.orderFrontRegardless()
     }
 
     @objc private func menuOpenSettings() {
         store.isExpanded = true
         store.showSettings = true
         store.settingsTab = 1
+        syncKeyWindowState()
         scheduleFrameUpdate(animated: true)
-        panel.orderFrontRegardless()
+    }
+
+    @objc private func menuToggleFilterMuted() {
+        store.setAutoFilterMutedChats(!store.autoFilterMutedChats)
+    }
+
+    @objc private func menuToggleHideWhenIdle() {
+        store.setHideOrbWhenIdle(!store.hideOrbWhenIdle)
     }
 
     @objc private func menuPausePeeks(_ sender: NSMenuItem) {

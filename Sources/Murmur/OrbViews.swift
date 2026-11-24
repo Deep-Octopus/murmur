@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct OrbRootView: View {
@@ -146,14 +147,16 @@ struct PeekSurface: View {
                 HStack(alignment: .center, spacing: 11) {
                     AppIconView(app: appObj, size: 24)
 
-                    VStack(alignment: .leading, spacing: 2.5) {
+                    VStack(alignment: .leading, spacing: 3) {
                         HStack(alignment: .firstTextBaseline, spacing: 5) {
                             Text(item.sender)
                                 .font(.system(size: 13.5, weight: .semibold))
                                 .foregroundStyle(palette.primaryInk)
                                 .lineLimit(1)
 
-                            if !item.subtitle.isEmpty {
+                            if item.hasMentionBreakthrough {
+                                MentionTagView(palette: palette)
+                            } else if !item.subtitle.isEmpty {
                                 Text(item.subtitle)
                                     .font(.system(size: 11.5))
                                     .foregroundStyle(palette.tertiaryInk)
@@ -172,11 +175,12 @@ struct PeekSurface: View {
                         Text(item.body)
                             .font(.system(size: 12.5))
                             .foregroundStyle(palette.secondaryInk)
-                            .lineLimit(1)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
 
                     HStack(spacing: 4) {
-                        IconActionButton(systemName: "checkmark", helpText: "已完成", palette: palette) {
+                        IconActionButton(systemName: "checkmark", helpText: "标记已完成", palette: palette) {
                             store.completeItem(item)
                         }
                         IconActionButton(systemName: "xmark", helpText: "收起提示", palette: palette) {
@@ -196,7 +200,7 @@ struct PeekSurface: View {
                 HStack(alignment: .center, spacing: 11) {
                     AppIconView(app: appObj, size: 24)
 
-                    VStack(alignment: .leading, spacing: 2.5) {
+                    VStack(alignment: .leading, spacing: 3) {
                         HStack(alignment: .firstTextBaseline, spacing: 5) {
                             Image(systemName: "clock.fill")
                                 .font(.system(size: 10.5))
@@ -218,7 +222,8 @@ struct PeekSurface: View {
                         Text(count > 1 ? "最早：\(oldestItem.sender) — \(oldestItem.body)" : oldestItem.body)
                             .font(.system(size: 12.5))
                             .foregroundStyle(palette.secondaryInk)
-                            .lineLimit(1)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
 
                     HStack(spacing: 4) {
@@ -238,7 +243,7 @@ struct PeekSurface: View {
                 }
             }
         }
-        .frame(width: 324)
+        .frame(width: 336)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(palette.surfaceFill)
@@ -288,7 +293,7 @@ struct ExpandedQueueSurface: View {
                     .padding(.vertical, 8)
             }
         }
-        .frame(width: 368)
+        .frame(width: 374)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(palette.surfaceFill)
@@ -302,7 +307,7 @@ struct ExpandedQueueSurface: View {
     }
 
     private var compactHeader: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
             if store.showSettings {
                 Button {
                     store.showSettings = false
@@ -343,6 +348,16 @@ struct ExpandedQueueSurface: View {
                     .buttonStyle(.plain)
                 }
 
+                if store.displayedQueueItems.count >= 2 && !store.showSnoozedSheet {
+                    IconActionButton(
+                        systemName: "checkmark.circle",
+                        helpText: "当前列表全部标为已阅（5秒内可 ⌘Z 撤销）",
+                        palette: palette
+                    ) {
+                        store.clearVisibleCompleted()
+                    }
+                }
+
                 IconActionButton(
                     systemName: store.sortOldestFirst ? "arrow.down" : "arrow.up",
                     helpText: store.sortOldestFirst ? "等待最久在前（点击切最新在前）" : "最新消息在前（点击切最久在前）",
@@ -353,36 +368,27 @@ struct ExpandedQueueSurface: View {
             }
 
             IconActionButton(
-                systemName: "plus.app",
-                helpText: "添加 / 管理监控软件",
+                systemName: store.isPinnedExpanded ? "pin.fill" : "pin",
+                helpText: store.isPinnedExpanded ? "已固定常驻（点击取消固定）" : "固定面板（点击外部或跳转后保持展开）",
+                isActive: store.isPinnedExpanded,
                 palette: palette
             ) {
-                if store.showSettings && store.settingsTab == 0 {
-                    store.showSettings = false
-                } else {
-                    store.showSettings = true
-                    store.settingsTab = 0
-                }
-                store.onLayoutNeedsUpdate?(true)
+                store.isPinnedExpanded.toggle()
             }
 
             IconActionButton(
                 systemName: "slider.horizontal.3",
-                helpText: "偏好与设置",
+                helpText: "监控软件与偏好设置",
+                isActive: store.showSettings,
                 palette: palette
             ) {
-                if store.showSettings && store.settingsTab != 0 {
-                    store.showSettings = false
-                } else {
-                    store.showSettings = true
-                    if store.settingsTab == 0 { store.settingsTab = 1 }
-                }
+                store.showSettings.toggle()
                 store.onLayoutNeedsUpdate?(true)
             }
 
             IconActionButton(
                 systemName: "chevron.up",
-                helpText: "收起面板 (Esc / ⌥M)",
+                helpText: "收起面板 (Esc / \(store.hotKeyPreset.displayLabel))",
                 palette: palette
             ) {
                 store.collapsePanel()
@@ -418,10 +424,24 @@ struct ExpandedQueueSurface: View {
                     store.onLayoutNeedsUpdate?(true)
                 }
             }
+
+            Button {
+                store.showSettings = true
+                store.settingsTab = 0
+                store.onLayoutNeedsUpdate?(true)
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(palette.tertiaryInk)
+                    .frame(width: 20, height: 20)
+                    .background(Circle().fill(palette.subtleControlFill.opacity(0.7)))
+            }
+            .buttonStyle(.plain)
+            .help("添加或管理监控软件")
         }
     }
 
-    // MARK: - Queue Body
+    // MARK: - Queue Body + Quiet Muted Chats Disclosure Drawer
 
     @ViewBuilder
     private var queueBody: some View {
@@ -463,25 +483,99 @@ struct ExpandedQueueSurface: View {
             if list.isEmpty {
                 calmEmptyState
             } else {
-                ScrollView(.vertical, showsIndicators: true) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(list.enumerated()), id: \.element.id) { idx, item in
-                            ConversationRowView(
-                                store: store,
-                                item: item,
-                                isKeyboardSelected: idx == store.selectedKeyboardIndex,
-                                palette: palette
-                            )
-                            if idx < list.count - 1 {
-                                Rectangle()
-                                    .fill(palette.dividerColor)
-                                    .frame(height: 1)
-                                    .padding(.leading, 48)
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical, showsIndicators: true) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(Array(list.enumerated()), id: \.element.id) { idx, item in
+                                ConversationRowView(
+                                    store: store,
+                                    item: item,
+                                    isKeyboardSelected: idx == store.selectedKeyboardIndex,
+                                    palette: palette
+                                )
+                                .id(item.id)
+
+                                if idx < list.count - 1 {
+                                    Rectangle()
+                                        .fill(palette.dividerColor)
+                                        .frame(height: 1)
+                                        .padding(.leading, 48)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 356)
+                    .onChange(of: store.selectedKeyboardIndex) { _, newIdx in
+                        let currentList = store.displayedQueueItems
+                        if newIdx >= 0 && newIdx < currentList.count {
+                            withAnimation(.easeOut(duration: 0.14)) {
+                                proxy.scrollTo(currentList[newIdx].id, anchor: nil)
                             }
                         }
                     }
                 }
-                .frame(maxHeight: 356)
+            }
+
+            let mutedList = store.displayedSuppressedMutedItems
+            if !mutedList.isEmpty {
+                Rectangle()
+                    .fill(palette.dividerColor)
+                    .frame(height: 1)
+
+                mutedDisclosureSection(mutedList: mutedList)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func mutedDisclosureSection(mutedList: [MessageItem]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                store.showMutedDrawer.toggle()
+                store.onLayoutNeedsUpdate?(true)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "bell.slash")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(palette.tertiaryInk)
+
+                    Text("已静默折叠 \(mutedList.count) 个免打扰会话（有人 @我 时自动提至上方）")
+                        .font(.system(size: 11))
+                        .foregroundStyle(palette.tertiaryInk)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 4)
+
+                    Image(systemName: store.showMutedDrawer ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .foregroundStyle(palette.tertiaryInk)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if store.showMutedDrawer {
+                Rectangle()
+                    .fill(palette.dividerColor.opacity(0.65))
+                    .frame(height: 1)
+
+                ScrollView(.vertical, showsIndicators: true) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(mutedList.enumerated()), id: \.element.id) { idx, mItem in
+                            MutedConversationRowView(store: store, item: mItem, palette: palette)
+                            if idx < mutedList.count - 1 {
+                                Rectangle()
+                                    .fill(palette.dividerColor.opacity(0.5))
+                                    .frame(height: 1)
+                                    .padding(.leading, 40)
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 148)
+                .background(palette.subtleControlFill.opacity(0.32))
             }
         }
     }
@@ -498,9 +592,10 @@ struct ExpandedQueueSurface: View {
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(palette.secondaryInk)
 
-                Text("实时通知横幅与未读状态自动同步中")
+                Text("新通知横幅与未读状态实时同步中，免打扰闲聊已自动静默")
                     .font(.system(size: 11.5))
                     .foregroundStyle(palette.tertiaryInk)
+                    .multilineTextAlignment(.center)
 
                 Button("打开\(targetApp.displayName) ↗") {
                     store.onOpenAppRequested?(targetApp)
@@ -517,16 +612,31 @@ struct ExpandedQueueSurface: View {
                     .foregroundStyle(palette.secondaryInk)
 
                 if store.hasUnresolvedAggregatePresence {
-                    Text("Dock 角标显示有未读，展开对应软件窗口后可自动提取会话")
+                    Text("Dock 角标显示有未读，展开对应软件窗口后可自动定位会话")
                         .font(.system(size: 11.5))
                         .foregroundStyle(palette.tertiaryInk)
                         .multilineTextAlignment(.center)
+                } else {
+                    Text("按等待时间顺序守护重要消息 · 空格可预览长文 · ⏎ 直达会话")
+                        .font(.system(size: 11))
+                        .foregroundStyle(palette.tertiaryInk)
+                        .multilineTextAlignment(.center)
+
+                    Button("载入示例体验") {
+                        store.injectDemoSample()
+                    }
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(palette.secondaryInk)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 3.5)
+                    .background(Capsule().fill(palette.subtleControlFill))
+                    .buttonStyle(.plain)
                 }
             }
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 18)
-        .padding(.vertical, 24)
+        .padding(.vertical, 22)
     }
 
     private var feedbackFooter: some View {
@@ -537,7 +647,7 @@ struct ExpandedQueueSurface: View {
                     .foregroundStyle(palette.secondaryInk)
                     .lineLimit(1)
                 Spacer()
-                Button("撤销") {
+                Button("撤销 (⌘Z)") {
                     store.undoLastAction()
                 }
                 .font(.system(size: 11.5, weight: .semibold))
@@ -553,14 +663,14 @@ struct ExpandedQueueSurface: View {
         }
     }
 
-    // MARK: - 3-Tab Complete Settings (1: 监控软件, 2: 外观与快捷键, 3: 提醒与屏蔽)
+    // MARK: - 3-Tab Complete Settings (0: 监控软件, 1: 外观·热键, 2: 降噪·提醒)
 
     private var settingsBody: some View {
         VStack(alignment: .leading, spacing: 11) {
             HStack(spacing: 5) {
                 tabPill("监控软件", index: 0)
                 tabPill("外观·热键", index: 1)
-                tabPill("提醒·屏蔽", index: 2)
+                tabPill("降噪·提醒", index: 2)
             }
 
             if store.settingsTab == 0 {
@@ -606,7 +716,7 @@ struct ExpandedQueueSurface: View {
                     .foregroundStyle(palette.secondaryInk)
                 Spacer()
                 Button {
-                    if let picked = AppPickerHelper.pickApplicationFromDisk() {
+                    if let picked = AppPickerHelper.pickApplicationFromDisk(store: store) {
                         store.addOrEnableApp(picked)
                     }
                 } label: {
@@ -677,7 +787,6 @@ struct ExpandedQueueSurface: View {
             }
             .frame(maxHeight: 175)
 
-            // Quick-add popular IM presets not yet added
             let existingIds = Set(store.monitoredApps.flatMap(\.mainBundleIds))
             let availablePresets = MonitoredApp.popularPresets.filter { preset in
                 Set(preset.mainBundleIds).isDisjoint(with: existingIds)
@@ -716,7 +825,7 @@ struct ExpandedQueueSurface: View {
         }
     }
 
-    // MARK: - Tab 1: Appearance, Hotkey & Launch at Login
+    // MARK: - Tab 1: Appearance, Zero-Pixel Zen Mode, Hotkey & Launch at Login
 
     private var orbScaleBinding: Binding<Double> {
         Binding<Double>(
@@ -729,7 +838,7 @@ struct ExpandedQueueSurface: View {
     }
 
     private var appearanceAndWindowTab: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 9) {
             VStack(alignment: .leading, spacing: 5) {
                 Text("外观色调")
                     .font(.system(size: 11.5, weight: .medium))
@@ -782,14 +891,14 @@ struct ExpandedQueueSurface: View {
                 }
             }
 
-            VStack(spacing: 5) {
+            VStack(spacing: 4) {
                 HStack {
                     Text("悬浮球尺寸")
-                        .font(.system(size: 12))
+                        .font(.system(size: 11.5))
                         .foregroundStyle(palette.primaryInk)
                     Spacer()
                     Text("\(Int(round(store.orbScale * 100.0)))%")
-                        .font(.system(size: 11.5, weight: .medium))
+                        .font(.system(size: 11, weight: .medium))
                         .monospacedDigit()
                         .foregroundStyle(palette.secondaryInk)
                 }
@@ -797,11 +906,11 @@ struct ExpandedQueueSurface: View {
 
                 HStack {
                     Text("静默透明度")
-                        .font(.system(size: 12))
+                        .font(.system(size: 11.5))
                         .foregroundStyle(palette.primaryInk)
                     Spacer()
                     Text("\(Int(round(store.idleOpacity * 100.0)))%")
-                        .font(.system(size: 11.5, weight: .medium))
+                        .font(.system(size: 11, weight: .medium))
                         .monospacedDigit()
                         .foregroundStyle(palette.secondaryInk)
                 }
@@ -811,21 +920,57 @@ struct ExpandedQueueSurface: View {
             Rectangle().fill(palette.dividerColor).frame(height: 1)
 
             Toggle(
-                "全局快捷键 ⌥M 呼出（支持 ↑↓ 选行 · ⏎ 跳转 · ⌫ 完成）",
+                "无待办时自动隐藏桌面胶囊（仅保留顶部菜单栏图标）",
                 isOn: Binding(
-                    get: { store.enableGlobalHotkey },
-                    set: { val in
-                        store.enableGlobalHotkey = val
-                        store.onHotkeySettingChanged?(val)
-                    }
+                    get: { store.hideOrbWhenIdle },
+                    set: { store.setHideOrbWhenIdle($0) }
                 )
             )
             .font(.system(size: 11.5))
             .toggleStyle(.switch)
             .controlSize(.mini)
 
+            HStack(spacing: 8) {
+                Toggle(
+                    "全局呼出热键",
+                    isOn: Binding(
+                        get: { store.enableGlobalHotkey },
+                        set: { val in
+                            store.enableGlobalHotkey = val
+                            store.onHotkeySettingChanged?(val)
+                        }
+                    )
+                )
+                .font(.system(size: 11.5))
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+
+                Spacer()
+
+                Picker(
+                    "",
+                    selection: Binding(
+                        get: { store.hotKeyPreset },
+                        set: { store.hotKeyPreset = $0 }
+                    )
+                ) {
+                    ForEach(HotKeyPreset.allCases) { preset in
+                        Text(preset.displayLabel).tag(preset)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 112)
+                .disabled(!store.enableGlobalHotkey)
+            }
+
+            if store.hotKeyConflictError {
+                Text("⚠️ 当前快捷键已被其他软件占用，建议切换为 ⌃+⌥+M")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(palette.overdueAccent)
+            }
+
             HStack {
-                Toggle("锁定拖动位置（按住 ⌥ 可临时拖动）", isOn: $store.lockOrbPosition)
+                Toggle("锁定拖动位置（按住 ⌥ 拖动）", isOn: $store.lockOrbPosition)
                     .font(.system(size: 11.5))
                     .toggleStyle(.switch)
                     .controlSize(.mini)
@@ -863,10 +1008,29 @@ struct ExpandedQueueSurface: View {
         }
     }
 
-    // MARK: - Tab 2: Escalation Timers, Meeting Pause & Muted Conversations
+    // MARK: - Tab 2: Smart Muted Filtering, Escalation Timers & Block Rules
 
     private var rulesAndMuteTab: some View {
         VStack(alignment: .leading, spacing: 9) {
+            VStack(alignment: .leading, spacing: 3) {
+                Toggle(
+                    "智能过滤「消息免打扰」群（保留 @我 / @所有人 破圈提醒）",
+                    isOn: Binding(
+                        get: { store.autoFilterMutedChats },
+                        set: { store.setAutoFilterMutedChats($0) }
+                    )
+                )
+                .font(.system(size: 11.5, weight: .medium))
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+
+                Text("结合静音标识与 Dock 真实未读数自动折叠免打扰群，列表底部可随时展开查看")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(palette.tertiaryInk)
+            }
+
+            Rectangle().fill(palette.dividerColor).frame(height: 1)
+
             HStack {
                 Text("温和变色提醒")
                     .font(.system(size: 12))
@@ -927,14 +1091,13 @@ struct ExpandedQueueSurface: View {
 
             Rectangle().fill(palette.dividerColor).frame(height: 1)
 
-            // Muted noisy groups manager
             VStack(alignment: .leading, spacing: 5) {
-                Text("已屏蔽会话（在列表中右键任意群可添加屏蔽）")
+                Text("永久屏蔽名单（右键任意会话可添加）")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(palette.secondaryInk)
 
                 if store.mutedRules.isEmpty {
-                    Text("暂无屏蔽规则")
+                    Text("暂无手动屏蔽会话")
                         .font(.system(size: 11))
                         .foregroundStyle(palette.tertiaryInk)
                 } else {
@@ -960,7 +1123,7 @@ struct ExpandedQueueSurface: View {
                             }
                         }
                     }
-                    .frame(maxHeight: 84)
+                    .frame(maxHeight: 78)
                 }
             }
 
@@ -976,7 +1139,7 @@ struct ExpandedQueueSurface: View {
                 .buttonStyle(.plain)
 
                 if !store.items.isEmpty {
-                    Button("全部标已处理") {
+                    Button("全部标已阅") {
                         store.clearVisibleCompleted()
                     }
                     .font(.system(size: 11.5))
@@ -997,7 +1160,7 @@ struct ExpandedQueueSurface: View {
     }
 }
 
-// MARK: - 4. Conversation Row with Right-Click Mute & Keyboard Highlight
+// MARK: - 4. Conversation Row (2-Line Default + Space 8-Line Expand + @提及 Tag)
 
 struct ConversationRowView: View {
     @ObservedObject var store: MessageStore
@@ -1008,14 +1171,16 @@ struct ConversationRowView: View {
     var body: some View {
         let appObj = store.app(for: item.appId)
         let hovering = (store.hoveredRowId == item.id)
+        let isBodyExpanded = (store.expandedBodyItemId == item.id)
         let level = item.agingLevel(
             at: store.now,
             warningMinutes: store.warningMinutes,
             overdueMinutes: store.overdueMinutes
         )
 
-        HStack(alignment: .center, spacing: 11) {
+        HStack(alignment: .top, spacing: 11) {
             AppIconView(app: appObj, size: 22)
+                .padding(.top, 2)
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 5) {
@@ -1023,6 +1188,10 @@ struct ConversationRowView: View {
                         .font(.system(size: 13.5, weight: .semibold))
                         .foregroundStyle(palette.primaryInk)
                         .lineLimit(1)
+
+                    if item.hasMentionBreakthrough {
+                        MentionTagView(palette: palette)
+                    }
 
                     if !item.subtitle.isEmpty {
                         Text("· \(item.subtitle)")
@@ -1040,10 +1209,19 @@ struct ConversationRowView: View {
 
                     if hovering {
                         HStack(spacing: 4) {
-                            IconActionButton(systemName: "clock", helpText: "稍后 15 分钟提醒", palette: palette) {
+                            if item.body.count > 26 {
+                                IconActionButton(
+                                    systemName: isBodyExpanded ? "chevron.up.circle" : "text.magnifyingglass",
+                                    helpText: isBodyExpanded ? "收起长消息 (Space)" : "展开完整消息 (Space)",
+                                    palette: palette
+                                ) {
+                                    store.toggleExpandedBody(for: item.id)
+                                }
+                            }
+                            IconActionButton(systemName: "clock", helpText: "稍后 15 分钟提醒 (S)", palette: palette) {
                                 store.snooze(item, minutes: 15)
                             }
-                            IconActionButton(systemName: "checkmark", helpText: "标记已完成", palette: palette) {
+                            IconActionButton(systemName: "checkmark", helpText: "标记已完成 (⌫)", palette: palette) {
                                 store.completeItem(item)
                             }
                         }
@@ -1059,12 +1237,14 @@ struct ConversationRowView: View {
                 Text(item.body)
                     .font(.system(size: 12.5))
                     .foregroundStyle(palette.secondaryInk)
-                    .lineLimit(1)
+                    .lineLimit(isBodyExpanded ? 8 : 2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .help(item.body)
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9.5)
-        .frame(minHeight: 55)
+        .frame(minHeight: 56)
         .background(
             (hovering || isKeyboardSelected) ? palette.rowHoverFill : Color.clear
         )
@@ -1073,6 +1253,11 @@ struct ConversationRowView: View {
                 RoundedRectangle(cornerRadius: 1.5)
                     .fill(palette.overdueAccent)
                     .frame(width: 2.5, height: 26)
+                    .padding(.leading, 3)
+            } else if isKeyboardSelected {
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(palette.calmAccent.opacity(0.65))
+                    .frame(width: 2.5, height: 22)
                     .padding(.leading, 3)
             }
         }
@@ -1088,21 +1273,93 @@ struct ConversationRowView: View {
             store.handleRowTap(item)
         }
         .contextMenu {
-            Button("直达该会话") {
+            Button("直达该会话 (⏎)") {
                 store.handleRowTap(item)
             }
-            Button("标记已完成") {
+            Button("标记已完成 (⌫)") {
                 store.completeItem(item)
             }
+            Button(isBodyExpanded ? "收起完整消息 (Space)" : "展开完整消息 (Space)") {
+                store.toggleExpandedBody(for: item.id)
+            }
             Divider()
-            Button("稍后 15 分钟提醒") {
+            Button("稍后 15 分钟提醒 (S)") {
                 store.snooze(item, minutes: 15)
             }
             Button("稍后 1 小时提醒") {
                 store.snooze(item, minutes: 60)
             }
+            Button("稍后 3 小时提醒") {
+                store.snooze(item, minutes: 180)
+            }
+            Button("明天上午 09:30 提醒") {
+                store.snoozeUntilTomorrowMorning(item)
+            }
             Divider()
-            Button("屏蔽「\(item.sender)」（不再列入）") {
+            Button("永久屏蔽「\(item.sender)」") {
+                store.muteConversation(item)
+            }
+        }
+    }
+}
+
+// MARK: - 5. Quiet Folded Muted Row (Inside Disclosure Drawer)
+
+struct MutedConversationRowView: View {
+    @ObservedObject var store: MessageStore
+    let item: MessageItem
+    let palette: Palette
+
+    var body: some View {
+        let appObj = store.app(for: item.appId)
+        let hovering = (store.hoveredRowId == item.id)
+
+        HStack(spacing: 9) {
+            AppIconView(app: appObj, size: 17)
+                .opacity(0.65)
+
+            VStack(alignment: .leading, spacing: 1.5) {
+                HStack(spacing: 4) {
+                    Text(item.sender)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(palette.secondaryInk)
+                        .lineLimit(1)
+
+                    if let cnt = item.unreadBadgeText {
+                        Text("[\(cnt)条]")
+                            .font(.system(size: 10.5))
+                            .monospacedDigit()
+                            .foregroundStyle(palette.tertiaryInk)
+                    }
+
+                    Spacer()
+                }
+
+                Text(item.body)
+                    .font(.system(size: 11))
+                    .foregroundStyle(palette.tertiaryInk)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6.5)
+        .background(hovering ? palette.rowHoverFill : Color.clear)
+        .contentShape(Rectangle())
+        .onHover { isHover in
+            if isHover {
+                store.hoveredRowId = item.id
+            } else if store.hoveredRowId == item.id {
+                store.hoveredRowId = nil
+            }
+        }
+        .onTapGesture {
+            store.handleRowTap(item)
+        }
+        .contextMenu {
+            Button("打开查看该免打扰会话") {
+                store.handleRowTap(item)
+            }
+            Button("永久屏蔽「\(item.sender)」（不再统计）") {
                 store.muteConversation(item)
             }
         }
@@ -1110,6 +1367,22 @@ struct ConversationRowView: View {
 }
 
 // MARK: - Micro Components
+
+struct MentionTagView: View {
+    let palette: Palette
+
+    var body: some View {
+        Text("@提及")
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(palette.overdueAccent)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(palette.overdueAccent.opacity(0.13))
+            )
+    }
+}
 
 struct AgeBadgeView: View {
     let label: String
@@ -1184,6 +1457,7 @@ struct QuietFilterButton: View {
 struct IconActionButton: View {
     let systemName: String
     let helpText: String
+    var isActive: Bool = false
     let palette: Palette
     let action: () -> Void
 
@@ -1191,9 +1465,11 @@ struct IconActionButton: View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(palette.secondaryInk)
+                .foregroundStyle(isActive ? palette.calmAccent : palette.secondaryInk)
                 .frame(width: 22, height: 22)
-                .background(Circle().fill(palette.subtleControlFill))
+                .background(
+                    Circle().fill(isActive ? palette.calmAccent.opacity(0.15) : palette.subtleControlFill)
+                )
         }
         .buttonStyle(.plain)
         .help(helpText)

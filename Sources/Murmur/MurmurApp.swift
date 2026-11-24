@@ -13,21 +13,18 @@ struct MurmurMain {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate {
     private var store: MessageStore!
     private var panelController: FloatingPanelController!
     private var userNotedWatcher: UserNotedWatcher!
     private var axBridge: AccessibilityBridge!
     private var statusItem: NSStatusItem!
     private var appActivationObserver: NSObjectProtocol?
+    private var didStartUserNotedWatcher = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         store = MessageStore()
         panelController = FloatingPanelController(store: store)
-
-        axBridge = AccessibilityBridge(initialApps: store.monitoredApps) { [weak self] observation in
-            self?.store.reconcileAXObservation(observation)
-        }
 
         userNotedWatcher = UserNotedWatcher(
             initialApps: store.monitoredApps,
@@ -38,6 +35,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self?.store.notificationReaderState = state
             }
         )
+
+        axBridge = AccessibilityBridge(initialApps: store.monitoredApps) { [weak self] observation in
+            guard let self else { return }
+            self.store.reconcileAXObservation(observation)
+            self.startUserNotedWatcherOnce()
+        }
 
         store.onMonitoredAppsChanged = { [weak self] updatedApps in
             self?.axBridge.updateMonitoredApps(updatedApps)
@@ -57,11 +60,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.axBridge.openAppDirectly(monitoredApp)
         }
 
+        store.onStatusItemNeedsUpdate = { [weak self] in
+            self?.refreshStatusBarAppearance()
+        }
+
         setupMenuBarItem()
+        refreshStatusBarAppearance()
         panelController.show()
 
+        // Run initial AX/Dock ground-truth scan BEFORE starting notification backfill
         axBridge.startPolling()
-        userNotedWatcher.start()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak self] in
+            self?.startUserNotedWatcherOnce()
+        }
 
         appActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
@@ -74,6 +85,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private func startUserNotedWatcherOnce() {
+        guard !didStartUserNotedWatcher else { return }
+        didStartUserNotedWatcher = true
+        userNotedWatcher.start()
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         axBridge?.stopPolling()
         userNotedWatcher?.stop()
@@ -84,25 +101,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func setupMenuBarItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = statusItem.button {
-            button.image = NSImage(
-                systemSymbolName: "tray.and.arrow.down",
-                accessibilityDescription: "Murmur"
-            )
-        }
-
-        let menu = NSMenu()
-        menu.delegate = self
-        statusItem.menu = menu
+        guard let button = statusItem.button else { return }
+        button.imagePosition = .imageLeading
+        button.target = self
+        button.action = #selector(handleStatusBarButtonClick(_:))
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        button.toolTip = "Murmur — 左键展开待办队列，右键打开快捷菜单"
     }
 
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        menu.removeAllItems()
-        let built = panelController.buildControlMenu()
-        while !built.items.isEmpty {
-            let item = built.items[0]
-            built.removeItem(at: 0)
-            menu.addItem(item)
+    private func refreshStatusBarAppearance() {
+        guard let button = statusItem?.button else { return }
+        let count = store.pendingItemCount
+        let symbolName: String
+        if store.isPeeksPaused {
+            symbolName = "moon.fill"
+        } else if count > 0 {
+            symbolName = "tray.full.fill"
+        } else {
+            symbolName = "tray.and.arrow.down"
+        }
+
+        button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Murmur")
+        if count > 0 {
+            let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+            button.attributedTitle = NSAttributedString(
+                string: " \(count)",
+                attributes: [.font: font]
+            )
+        } else {
+            button.title = ""
+        }
+    }
+
+    @objc private func handleStatusBarButtonClick(_ sender: NSStatusBarButton) {
+        let event = NSApp.currentEvent
+        let isRightClick = (event?.type == .rightMouseUp) || (event?.modifierFlags.contains(.control) == true)
+
+        if isRightClick {
+            let menu = panelController.buildControlMenu()
+            statusItem.menu = menu
+            sender.performClick(nil)
+            statusItem.menu = nil
+        } else {
+            panelController.handleStatusBarLeftClick()
         }
     }
 }

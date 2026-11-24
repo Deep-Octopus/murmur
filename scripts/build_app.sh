@@ -7,13 +7,13 @@ APP_NAME="Murmur"
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 
-echo "==> Building $APP_NAME v1.0.0..."
+echo "==> Building $APP_NAME v1.1.0..."
 cd "$ROOT_DIR"
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 
-swiftc -parse-as-library -Onone -swift-version 5 \
+swiftc -parse-as-library -O -swift-version 5 \
     Sources/Murmur/*.swift \
     -lsqlite3 \
     -framework AppKit \
@@ -53,9 +53,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<'EOF'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>1.1.0</string>
     <key>CFBundleVersion</key>
-    <string>100</string>
+    <string>110</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>

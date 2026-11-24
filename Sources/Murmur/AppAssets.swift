@@ -155,7 +155,10 @@ struct AppIconView: View {
 
 enum AppPickerHelper {
     @MainActor
-    static func pickApplicationFromDisk() -> MonitoredApp? {
+    static func pickApplicationFromDisk(store: MessageStore) -> MonitoredApp? {
+        store.isModalPickerOpen = true
+        defer { store.isModalPickerOpen = false }
+
         let panel = NSOpenPanel()
         panel.title = "选择要加入 Murmur 监控的软件"
         panel.prompt = "添加监控"

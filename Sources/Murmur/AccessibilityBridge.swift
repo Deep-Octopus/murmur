@@ -7,6 +7,7 @@ struct AXWorldObservation {
     let dockBadges: [String: DockBadgeReading]
     let conversations: [ConversationSnapshot]
     let readableSidebarAppIds: Set<String>
+    let activeTenantByAppId: [String: String]
     let tenantHints: [TenantBadgeHint]
     let liveSystemBanners: [ConversationSnapshot]
 }
@@ -151,6 +152,7 @@ final class AccessibilityBridge {
                 dockBadges: unavailable,
                 conversations: [],
                 readableSidebarAppIds: [],
+                activeTenantByAppId: [:],
                 tenantHints: [],
                 liveSystemBanners: []
             )
@@ -159,6 +161,7 @@ final class AccessibilityBridge {
         let dockBadges = readDockBadges(apps: apps)
         var allConversations: [ConversationSnapshot] = []
         var readableAppIds: Set<String> = []
+        var activeTenantByApp: [String: String] = [:]
         var allTenantHints: [TenantBadgeHint] = []
 
         for monitored in apps {
@@ -182,6 +185,9 @@ final class AccessibilityBridge {
                 let rail = scanTenantRail(window: mainWin, appId: monitored.id)
                 allTenantHints.append(contentsOf: rail.tenants)
                 activeTenant = rail.selectedTenantName
+                if let activeTenant, !activeTenant.isEmpty {
+                    activeTenantByApp[monitored.id] = activeTenant
+                }
             }
 
             let sidebarResult = scanUnreadConversations(
@@ -204,6 +210,7 @@ final class AccessibilityBridge {
             dockBadges: dockBadges,
             conversations: allConversations,
             readableSidebarAppIds: readableAppIds,
+            activeTenantByAppId: activeTenantByApp,
             tenantHints: allTenantHints,
             liveSystemBanners: liveBanners
         )
@@ -221,7 +228,7 @@ final class AccessibilityBridge {
         }
     }
 
-    // MARK: - 1. Honest Dock Badge Inspection (Matches by Bundle URL OR Tile Name!)
+    // MARK: - 1. Honest Dock Badge Inspection (Truth Anchor for Unmuted Counts!)
 
     private func readDockBadges(apps: [MonitoredApp]) -> [String: DockBadgeReading] {
         var result: [String: DockBadgeReading] = [:]
@@ -280,7 +287,7 @@ final class AccessibilityBridge {
         return .dot
     }
 
-    // MARK: - 2. Multi-Workspace / Multi-Tenant Left Rail Scanner (Feishu, DingTalk, Slack)
+    // MARK: - 2. Multi-Workspace / Multi-Tenant Left Rail Scanner
 
     private func scanTenantRail(window: AXUIElement, appId: String) -> (tenants: [TenantBadgeHint], selectedTenantName: String?) {
         guard let winPos = copyPosition(of: window), let winSize = copySize(of: window), winSize.width >= 420 else {
@@ -296,9 +303,9 @@ final class AccessibilityBridge {
         var seenNames: Set<String> = []
 
         for node in railNodes {
-            var leafTexts: [LeafNode] = []
+            var summary = SubtreeInspection()
             var leafBudget = 0
-            collectLeaves(under: node, depth: 0, visited: &leafBudget, into: &leafTexts)
+            inspectSubtree(under: node, depth: 0, visited: &leafBudget, into: &summary)
 
             let directTitle = copyStringAttr(of: node, attr: kAXTitleAttribute as String)
                 ?? copyStringAttr(of: node, attr: kAXDescriptionAttribute as String)
@@ -308,17 +315,24 @@ final class AccessibilityBridge {
             let isSelected = copyBoolAttr(of: node, attr: kAXSelectedAttribute as String) == true
 
             var badgeFound: String? = nil
+            var isDotBadge = false
             var candidateNames: [String] = []
 
             if !directTitle.isEmpty {
-                let parsed = extractEmbeddedBadge(from: directTitle)
-                if let b = parsed.badge { badgeFound = b }
+                let parsed = extractAccessibilityUnreadLabel(from: directTitle)
+                if let b = parsed.badge {
+                    badgeFound = b
+                    isDotBadge = (b == "有未读")
+                }
                 if !parsed.cleanName.isEmpty { candidateNames.append(parsed.cleanName) }
             }
 
-            for leaf in leafTexts {
+            for leaf in summary.leaves {
                 if let b = classifyStandaloneBadgeText(leaf.text) {
-                    badgeFound = badgeFound ?? b
+                    if badgeFound == nil {
+                        badgeFound = b
+                        isDotBadge = (b == "有未读")
+                    }
                 } else if !Self.isNavigationTabLabel(leaf.text) {
                     candidateNames.append(leaf.text)
                 }
@@ -332,7 +346,15 @@ final class AccessibilityBridge {
                 selectedName = rawName
             }
             if let badge = badgeFound {
-                hints.append(TenantBadgeHint(appId: appId, tenantName: rawName, badgeText: badge, isSelected: isSelected))
+                hints.append(
+                    TenantBadgeHint(
+                        appId: appId,
+                        tenantName: rawName,
+                        badgeText: badge,
+                        isDotOnly: isDotBadge || summary.hasMuteMetadata,
+                        isSelected: isSelected
+                    )
+                )
             }
         }
 
@@ -379,13 +401,38 @@ final class AccessibilityBridge {
         return navLabels.contains(text.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
-    // MARK: - 3. Per-Conversation Sidebar Unread Scanner
+    /// Built-in folded/muted/feed aggregator folders in Chinese & global IM sidebars
+    static func isNoiseAggregatorFolder(_ title: String) -> Bool {
+        let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let aggregators: Set<String> = [
+            "消息免打扰", "免打扰", "免打扰的群聊", "折叠的群聊", "折叠的会话", "不常联系群聊", "群助手",
+            "订阅号", "订阅号消息", "服务号", "公众号", "腾讯新闻", "QQ看点", "好友动态", "迷你世界",
+            "Muted Chats", "Collapsed Chats", "Archived", "Archived Chats"
+        ]
+        return aggregators.contains(clean)
+    }
+
+    static func containsMentionBreakthrough(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let signals = [
+            "@我", "有人@我", "有人@你", "[有人@我]", "[@我]", "@所有人", "@全体成员",
+            "@all", "@here", "@channel", "[特别关注]", "[加急]", "[紧急]", "[催办]", "mentioned you"
+        ]
+        return signals.contains { lower.contains($0) }
+    }
+
+    // MARK: - 3. Per-Conversation Sidebar Unread Scanner (With Muted vs Unmuted Signal Separation!)
 
     private struct LeafNode {
         let text: String
         let pos: CGPoint
         let size: CGSize
-        let isDescription: Bool
+    }
+
+    private struct SubtreeInspection {
+        var leaves: [LeafNode] = []
+        var hasMuteMetadata: Bool = false
+        var hasMentionSignal: Bool = false
     }
 
     private func scanUnreadConversations(
@@ -436,7 +483,7 @@ final class AccessibilityBridge {
         visited: inout Int,
         into out: inout [AXUIElement]
     ) {
-        guard depth <= 28, visited < 5500, out.count < 60 else { return }
+        guard depth <= 28, visited < 5500, out.count < 65 else { return }
         visited += 1
 
         if let pos = copyPosition(of: el), let sz = copySize(of: el) {
@@ -484,23 +531,29 @@ final class AccessibilityBridge {
         tenantName: String?,
         pid: pid_t
     ) -> ConversationSnapshot? {
-        var leaves: [LeafNode] = []
+        var inspection = SubtreeInspection()
         var visited = 0
-        collectLeaves(under: rowEl, depth: 0, visited: &visited, into: &leaves)
-        guard !leaves.isEmpty else { return nil }
+        inspectSubtree(under: rowEl, depth: 0, visited: &visited, into: &inspection)
+        guard !inspection.leaves.isEmpty else { return nil }
 
         let rowDesc = copyStringAttr(of: rowEl, attr: kAXDescriptionAttribute as String) ?? ""
         let rowTitle = copyStringAttr(of: rowEl, attr: kAXTitleAttribute as String) ?? ""
 
-        var detectedBadge: String? = nil
+        var standaloneBadge: String? = nil
+        var inlineMutedPrefixBadge: String? = nil
+        var mentionFound = inspection.hasMentionSignal
+            || Self.containsMentionBreakthrough(rowDesc)
+            || Self.containsMentionBreakthrough(rowTitle)
+
+        // 1. Check explicit "N条未读" / "unread" accessibility label on row wrapper (NOT bare "3条"!)
         for rawCombined in [rowDesc, rowTitle] where !rawCombined.isEmpty {
-            let extracted = extractEmbeddedBadge(from: rawCombined)
+            let extracted = extractAccessibilityUnreadLabel(from: rawCombined)
             if let b = extracted.badge {
-                detectedBadge = b
+                standaloneBadge = b
             }
         }
 
-        let sortedLeaves = leaves.sorted { a, b in
+        let sortedLeaves = inspection.leaves.sorted { a, b in
             if abs(a.pos.y - b.pos.y) > 8 {
                 return a.pos.y < b.pos.y
             }
@@ -512,24 +565,45 @@ final class AccessibilityBridge {
             let txt = leaf.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !txt.isEmpty else { continue }
 
-            let embedded = extractEmbeddedBadge(from: txt)
-            if let b = embedded.badge {
-                detectedBadge = detectedBadge ?? b
-                if !embedded.cleanName.isEmpty {
-                    contentTexts.append(LeafNode(text: embedded.cleanName, pos: leaf.pos, size: leaf.size, isDescription: leaf.isDescription))
+            if Self.containsMentionBreakthrough(txt) {
+                mentionFound = true
+            }
+
+            // Explicit accessibility unread label ("3条未读" / "3 unread")
+            let explicitLabel = extractAccessibilityUnreadLabel(from: txt)
+            if let b = explicitLabel.badge {
+                standaloneBadge = standaloneBadge ?? b
+                if !explicitLabel.cleanName.isEmpty {
+                    contentTexts.append(LeafNode(text: explicitLabel.cleanName, pos: leaf.pos, size: leaf.size))
                 }
                 continue
             }
 
+            // Leading bracketed muted prefix "[14条] 张三: 哈哈哈" at start of preview leaf!
+            let mutedPrefix = extractLeadingMutedCountPrefix(from: txt)
+            if let mb = mutedPrefix.badge {
+                inlineMutedPrefixBadge = inlineMutedPrefixBadge ?? mb
+                if !mutedPrefix.cleanPreview.isEmpty {
+                    contentTexts.append(LeafNode(text: mutedPrefix.cleanPreview, pos: leaf.pos, size: leaf.size))
+                }
+                continue
+            }
+
+            // Compact standalone badge pill ("1"..."999", "99+", "@", "•")
             if leaf.size.width <= 54 && leaf.size.height <= 30,
-               let standaloneBadge = classifyStandaloneBadgeText(txt) {
+               let pill = classifyStandaloneBadgeText(txt) {
+                if pill == "@我" {
+                    mentionFound = true
+                    standaloneBadge = standaloneBadge ?? "1"
+                    continue
+                }
                 let hasOtherTitleCandidate = sortedLeaves.contains { other in
                     other.text != leaf.text
                         && !Self.looksLikeTimestamp(other.text)
                         && classifyStandaloneBadgeText(other.text) == nil
                 }
                 if hasOtherTitleCandidate {
-                    detectedBadge = detectedBadge ?? standaloneBadge
+                    standaloneBadge = standaloneBadge ?? pill
                     continue
                 }
             }
@@ -541,7 +615,8 @@ final class AccessibilityBridge {
             contentTexts.append(leaf)
         }
 
-        guard let badgeText = detectedBadge else {
+        let finalBadge = standaloneBadge ?? inlineMutedPrefixBadge
+        guard let badgeText = finalBadge else {
             return nil
         }
 
@@ -549,14 +624,14 @@ final class AccessibilityBridge {
         var preview = contentTexts.dropFirst().first(where: { $0.text != title })?.text ?? ""
 
         if title.isEmpty, !rowDesc.isEmpty {
-            let cleaned = extractEmbeddedBadge(from: rowDesc).cleanName
+            let cleaned = extractAccessibilityUnreadLabel(from: rowDesc).cleanName
             let parts = cleaned.components(separatedBy: CharacterSet(charactersIn: "\n,，"))
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty && !Self.looksLikeTimestamp($0) }
             title = parts.first ?? ""
             preview = parts.dropFirst().first ?? ""
         } else {
-            title = extractEmbeddedBadge(from: title).cleanName
+            title = extractAccessibilityUnreadLabel(from: title).cleanName
         }
 
         guard !title.isEmpty, !Self.isNavigationTabLabel(title) else { return nil }
@@ -564,43 +639,81 @@ final class AccessibilityBridge {
             preview = badgeText == "有未读" ? "有新消息未读" : "\(badgeText) 条未读消息"
         }
 
+        let isNumericStandalone = (standaloneBadge != nil && standaloneBadge != "有未读")
+        let hasMuteEvidence = inspection.hasMuteMetadata
+            || Self.isNoiseAggregatorFolder(title)
+            || (inlineMutedPrefixBadge != nil)
+            || (badgeText == "有未读")
+
         return ConversationSnapshot(
             appId: appId,
             tenantName: tenantName,
             title: title,
             preview: preview,
             badgeText: badgeText,
+            hasStandaloneNumericBadge: isNumericStandalone,
+            hasExplicitMuteSignal: hasMuteEvidence,
+            hasMentionBreakthrough: mentionFound,
             pid: pid
         )
     }
 
-    private func collectLeaves(under el: AXUIElement, depth: Int, visited: inout Int, into out: inout [LeafNode]) {
-        guard depth <= 13, visited < 150 else { return }
+    private func inspectSubtree(
+        under el: AXUIElement,
+        depth: Int,
+        visited: inout Int,
+        into out: inout SubtreeInspection
+    ) {
+        guard depth <= 13, visited < 160 else { return }
         visited += 1
 
         let role = copyStringAttr(of: el, attr: kAXRoleAttribute as String) ?? ""
+        let helpTxt = copyStringAttr(of: el, attr: kAXHelpAttribute as String) ?? ""
+        let descTxt = copyStringAttr(of: el, attr: kAXDescriptionAttribute as String) ?? ""
+        let titleTxt = copyStringAttr(of: el, attr: kAXTitleAttribute as String) ?? ""
+
+        // Check Chromium/Electron DOM classes & mute icon accessibility hints
+        let domClasses = copyStringArrayAttr(of: el, attr: "AXDOMClassList") ?? []
+        let combinedMeta = ([helpTxt, role == "AXImage" ? descTxt : "", role == "AXImage" ? titleTxt : ""] + domClasses)
+            .joined(separator: " ")
+            .lowercased()
+
+        let muteKeywords = [
+            "免打扰", "已静音", "静音", "不提醒", "折叠", "屏蔽",
+            "mute", "muted", "silent", "dnd",
+            "no-disturb", "not-disturb", "dont-disturb", "do-not-disturb", "disturb-icon", "icon-disturb", "is-disturb",
+            "bell-off", "bell_off", "icon-mute", "grey-badge", "gray-badge", "badge-grey", "badge-gray", "badge_gray", "badge_grey"
+        ]
+        if muteKeywords.contains(where: { combinedMeta.contains($0) }) {
+            out.hasMuteMetadata = true
+        }
+        if domClasses.contains(where: { $0.lowercased().contains("mention") || $0.lowercased().contains("at-me") }) {
+            out.hasMentionSignal = true
+        }
+
         let children = copyChildren(of: el) ?? []
         let pos = copyPosition(of: el) ?? .zero
         let sz = copySize(of: el) ?? CGSize(width: 20, height: 16)
 
-        if ["AXStaticText", "AXButton", "AXImage", "AXLink", "AXGenericElement"].contains(role) || children.isEmpty {
-            for (attr, isDesc) in [(kAXValueAttribute as String, false), (kAXTitleAttribute as String, false), (kAXDescriptionAttribute as String, true)] {
+        if ["AXStaticText", "AXButton", "AXLink", "AXGenericElement"].contains(role) || (children.isEmpty && role != "AXImage") {
+            for attr in [kAXValueAttribute as String, kAXTitleAttribute as String, kAXDescriptionAttribute as String] {
                 if let val = copyStringAttr(of: el, attr: attr)?.trimmingCharacters(in: .whitespacesAndNewlines),
                    !val.isEmpty {
-                    out.append(LeafNode(text: val, pos: pos, size: sz, isDescription: isDesc))
+                    out.leaves.append(LeafNode(text: val, pos: pos, size: sz))
                     break
                 }
             }
         }
 
         for c in children {
-            collectLeaves(under: c, depth: depth + 1, visited: &visited, into: &out)
+            inspectSubtree(under: c, depth: depth + 1, visited: &visited, into: &out)
         }
     }
 
     private func classifyStandaloneBadgeText(_ text: String) -> String? {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty, t.count <= 4 else { return nil }
+        if t == "@" { return "@我" }
         if t == "99+" || t == "999+" { return t }
         if t.hasSuffix("+"), let n = Int(t.dropLast()), n > 0 { return t }
         if t.allSatisfy({ $0.isNumber }), let n = Int(t), n >= 1 && n <= 999 {
@@ -610,14 +723,16 @@ final class AccessibilityBridge {
         return nil
     }
 
-    private func extractEmbeddedBadge(from text: String) -> (badge: String?, cleanName: String) {
+    /// Strictly matches ONLY explicit unread accessibility labels ("3条未读", "未读消息 3", "3 unread"),
+    /// NEVER matching bare "3条" inside normal chat sentences like "这3条数据核对下"!
+    private func extractAccessibilityUnreadLabel(from text: String) -> (badge: String?, cleanName: String) {
         var working = text.trimmingCharacters(in: .whitespacesAndNewlines)
         var badge: String? = nil
 
         let patterns = [
-            #"\[?(\d+\+?)\s*条(?:未读)?\]?"#,
+            #"(\d+\+?)\s*条未读"#,
             #"未读消息?\s*(\d+\+?)"#,
-            #"(\d+\+?)\s*unread"#
+            #"(\d+\+?)\s*unread\b"#
         ]
         for pat in patterns {
             if let regex = try? NSRegularExpression(pattern: pat, options: [.caseInsensitive]) {
@@ -639,6 +754,25 @@ final class AccessibilityBridge {
 
         let cleaned = working.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "·-—:：()[]")))
         return (badge, cleaned)
+    }
+
+    /// Matches ONLY bracketed muted-chat count prefixes at the very start of a preview line: `[14条] 张三: 哈哈哈`
+    private func extractLeadingMutedCountPrefix(from preview: String) -> (badge: String?, cleanPreview: String) {
+        let working = preview.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pattern = #"^\[(\d+\+?)\s*条\]\s*"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return (nil, working)
+        }
+        let nsRange = NSRange(working.startIndex..<working.endIndex, in: working)
+        guard let match = regex.firstMatch(in: working, options: [], range: nsRange),
+              let r1 = Range(match.range(at: 1), in: working),
+              let fullR = Range(match.range(at: 0), in: working) else {
+            return (nil, working)
+        }
+        let countStr = String(working[r1])
+        var rest = working
+        rest.removeSubrange(fullR)
+        return (countStr, rest.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     private static func looksLikeTimestamp(_ text: String) -> Bool {
@@ -703,11 +837,11 @@ final class AccessibilityBridge {
         apps: [MonitoredApp],
         pid: pid_t
     ) -> ConversationSnapshot? {
-        var leaves: [LeafNode] = []
+        var inspection = SubtreeInspection()
         var visited = 0
-        collectLeaves(under: banner, depth: 0, visited: &visited, into: &leaves)
+        inspectSubtree(under: banner, depth: 0, visited: &visited, into: &inspection)
 
-        var parts = leaves.map(\.text)
+        var parts = inspection.leaves.map(\.text)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty && !["关闭", "回复", "选项", "清除", "Close", "Reply", "Options"].contains($0) && !Self.looksLikeTimestamp($0) }
 
@@ -747,6 +881,9 @@ final class AccessibilityBridge {
             title: sender,
             preview: body.isEmpty ? "发来一条新消息" : body,
             badgeText: "1",
+            hasStandaloneNumericBadge: true,
+            hasExplicitMuteSignal: false,
+            hasMentionBreakthrough: Self.containsMentionBreakthrough(body) || Self.containsMentionBreakthrough(sender),
             pid: pid
         )
     }
@@ -766,18 +903,22 @@ final class AccessibilityBridge {
                     continue
                 }
                 for win in windows {
-                    var leaves: [LeafNode] = []
+                    var inspection = SubtreeInspection()
                     var visited = 0
-                    collectLeaves(under: win, depth: 0, visited: &visited, into: &leaves)
-                    let texts = leaves.map(\.text).filter { !$0.isEmpty && $0 != "关闭" && $0 != "回复" }
+                    inspectSubtree(under: win, depth: 0, visited: &visited, into: &inspection)
+                    let texts = inspection.leaves.map(\.text).filter { !$0.isEmpty && $0 != "关闭" && $0 != "回复" }
                     guard texts.count >= 2 else { continue }
+                    let preview = texts.dropFirst().joined(separator: " · ")
                     banners.append(
                         ConversationSnapshot(
                             appId: app.id,
                             tenantName: nil,
                             title: texts[0],
-                            preview: texts.dropFirst().joined(separator: " · "),
+                            preview: preview,
                             badgeText: "1",
+                            hasStandaloneNumericBadge: true,
+                            hasExplicitMuteSignal: false,
+                            hasMentionBreakthrough: Self.containsMentionBreakthrough(preview) || Self.containsMentionBreakthrough(texts[0]),
                             pid: notifier.processIdentifier
                         )
                     )
@@ -798,7 +939,7 @@ final class AccessibilityBridge {
                 return .appLaunched
             }
             activateAndRaise(app: runningApp)
-            if trusted, trySelectTenant(pid: runningApp.processIdentifier, tenantName: tenant) {
+            if trusted, trySelectTenant(pid: runningApp.processIdentifier, tenantName: tenant).matched {
                 return .tenantSwitched(tenant)
             }
             return .appActivatedNeedsConfirm
@@ -825,14 +966,22 @@ final class AccessibilityBridge {
         AXUIElementSetMessagingTimeout(appRef, 0.40)
         ensureExtendedAccessibilityEnabled(app: runningApp, appRef: appRef)
 
+        var didSwitchTenant = false
         if app.supportsTenantRail, let targetTenant = item.tenantName, !targetTenant.isEmpty {
-            _ = trySelectTenant(pid: pid, tenantName: targetTenant)
+            didSwitchTenant = trySelectTenant(pid: pid, tenantName: targetTenant).switchedNew
         }
 
         if item.sourceKind != .dockHint {
-            usleep(50_000)
-            if tryPressVerifiedSidebarConversation(pid: pid, exactTitle: item.sender) {
-                return .conversationOpened
+            usleep(didSwitchTenant ? 220_000 : 50_000)
+            // Try matching sender first, then subtitle (e.g. group name when notification title was individual sender)
+            var candidates = [item.sender]
+            if !item.subtitle.isEmpty && item.subtitle != item.tenantName {
+                candidates.append(item.subtitle)
+            }
+            for target in candidates {
+                if tryPressVerifiedSidebarConversation(pid: pid, exactTitle: target) {
+                    return .conversationOpened
+                }
             }
         }
 
@@ -884,12 +1033,12 @@ final class AccessibilityBridge {
         }
     }
 
-    private func trySelectTenant(pid: pid_t, tenantName: String) -> Bool {
+    private func trySelectTenant(pid: pid_t, tenantName: String) -> (matched: Bool, switchedNew: Bool) {
         let appRef = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(appRef, 0.35)
         guard let windows = copyElementArrayAttr(of: appRef, attr: kAXWindowsAttribute as String),
               let mainWin = pickPrimaryWindow(from: windows),
-              let winPos = copyPosition(of: mainWin) else { return false }
+              let winPos = copyPosition(of: mainWin) else { return (false, false) }
 
         var railNodes: [AXUIElement] = []
         var visited = 0
@@ -899,14 +1048,14 @@ final class AccessibilityBridge {
             let blob = collectText(under: node, maxDepth: 4)
             if blob.contains(tenantName) {
                 if copyBoolAttr(of: node, attr: kAXSelectedAttribute as String) == true {
-                    return true
+                    return (true, false)
                 }
                 if AXUIElementPerformAction(node, kAXPressAction as CFString) == .success {
-                    return true
+                    return (true, true)
                 }
             }
         }
-        return false
+        return (false, false)
     }
 
     private func tryClickNotificationCenterBanner(matching item: MessageItem, appName: String) -> Bool {
@@ -950,8 +1099,17 @@ final class AccessibilityBridge {
         return false
     }
 
+    private static func stripGroupMemberSuffix(_ name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let regex = try? NSRegularExpression(pattern: #"\s*[\(（]\d+[\)）]$"#, options: []) else {
+            return trimmed
+        }
+        let range = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+        return regex.stringByReplacingMatches(in: trimmed, options: [], range: range, withTemplate: "")
+    }
+
     private func tryPressVerifiedSidebarConversation(pid: pid_t, exactTitle: String) -> Bool {
-        let cleanTarget = exactTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanTarget = Self.stripGroupMemberSuffix(exactTitle)
         guard !cleanTarget.isEmpty else { return false }
 
         let appRef = AXUIElementCreateApplication(pid)
@@ -973,16 +1131,17 @@ final class AccessibilityBridge {
         )
 
         for rowEl in candidateRows {
-            var leaves: [LeafNode] = []
+            var inspection = SubtreeInspection()
             var v = 0
-            collectLeaves(under: rowEl, depth: 0, visited: &v, into: &leaves)
+            inspectSubtree(under: rowEl, depth: 0, visited: &v, into: &inspection)
             let rowDesc = copyStringAttr(of: rowEl, attr: kAXDescriptionAttribute as String) ?? ""
             let rowTitle = copyStringAttr(of: rowEl, attr: kAXTitleAttribute as String) ?? ""
 
-            let exactLeafMatch = leaves.contains {
-                extractEmbeddedBadge(from: $0.text).cleanName == cleanTarget
+            let exactLeafMatch = inspection.leaves.contains { leaf in
+                let cleaned = Self.stripGroupMemberSuffix(extractAccessibilityUnreadLabel(from: leaf.text).cleanName)
+                return cleaned == cleanTarget
             }
-            let exactHeaderMatch = extractEmbeddedBadge(from: rowTitle).cleanName == cleanTarget
+            let exactHeaderMatch = Self.stripGroupMemberSuffix(extractAccessibilityUnreadLabel(from: rowTitle).cleanName) == cleanTarget
                 || rowDesc.components(separatedBy: CharacterSet(charactersIn: "\n,， ")).contains(cleanTarget)
 
             guard exactLeafMatch || exactHeaderMatch else { continue }
@@ -1038,6 +1197,13 @@ final class AccessibilityBridge {
         var ref: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attr as CFString, &ref) == .success,
               let arr = ref as? [AXUIElement] else { return nil }
+        return arr
+    }
+
+    private func copyStringArrayAttr(of element: AXUIElement, attr: String) -> [String]? {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attr as CFString, &ref) == .success,
+              let arr = ref as? [String] else { return nil }
         return arr
     }
 

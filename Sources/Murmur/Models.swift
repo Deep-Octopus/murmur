@@ -1,3 +1,4 @@
+import Carbon
 import Foundation
 import SwiftUI
 
@@ -9,6 +10,7 @@ struct MonitoredApp: Identifiable, Codable, Equatable, Hashable {
     var dockTileNames: [String]
     var isEnabled: Bool
     var supportsTenantRail: Bool
+    var sumsUnreadInDockBadge: Bool
     var isBuiltIn: Bool
 
     var primaryBundleId: String {
@@ -44,7 +46,44 @@ struct MonitoredApp: Identifiable, Codable, Equatable, Hashable {
         return dockNamesSet.contains { $0.lowercased() == lower }
     }
 
-    // MARK: - Built-in Defaults & Popular IM Presets
+    enum CodingKeys: String, CodingKey {
+        case id, displayName, mainBundleIds, helperBundleIds, dockTileNames, isEnabled, supportsTenantRail, sumsUnreadInDockBadge, isBuiltIn
+    }
+
+    init(
+        id: String,
+        displayName: String,
+        mainBundleIds: [String],
+        helperBundleIds: [String],
+        dockTileNames: [String],
+        isEnabled: Bool,
+        supportsTenantRail: Bool,
+        sumsUnreadInDockBadge: Bool = true,
+        isBuiltIn: Bool
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.mainBundleIds = mainBundleIds
+        self.helperBundleIds = helperBundleIds
+        self.dockTileNames = dockTileNames
+        self.isEnabled = isEnabled
+        self.supportsTenantRail = supportsTenantRail
+        self.sumsUnreadInDockBadge = sumsUnreadInDockBadge
+        self.isBuiltIn = isBuiltIn
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        displayName = try c.decode(String.self, forKey: .displayName)
+        mainBundleIds = try c.decode([String].self, forKey: .mainBundleIds)
+        helperBundleIds = try c.decodeIfPresent([String].self, forKey: .helperBundleIds) ?? []
+        dockTileNames = try c.decodeIfPresent([String].self, forKey: .dockTileNames) ?? [displayName]
+        isEnabled = try c.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
+        supportsTenantRail = try c.decodeIfPresent(Bool.self, forKey: .supportsTenantRail) ?? false
+        sumsUnreadInDockBadge = try c.decodeIfPresent(Bool.self, forKey: .sumsUnreadInDockBadge) ?? (id != "slack" && id != "discord")
+        isBuiltIn = try c.decodeIfPresent(Bool.self, forKey: .isBuiltIn) ?? false
+    }
 
     static let defaultApps: [MonitoredApp] = [
         MonitoredApp(
@@ -55,6 +94,7 @@ struct MonitoredApp: Identifiable, Codable, Equatable, Hashable {
             dockTileNames: ["飞书", "Lark", "Feishu"],
             isEnabled: true,
             supportsTenantRail: true,
+            sumsUnreadInDockBadge: true,
             isBuiltIn: true
         ),
         MonitoredApp(
@@ -65,6 +105,7 @@ struct MonitoredApp: Identifiable, Codable, Equatable, Hashable {
             dockTileNames: ["微信", "WeChat"],
             isEnabled: true,
             supportsTenantRail: false,
+            sumsUnreadInDockBadge: true,
             isBuiltIn: true
         ),
         MonitoredApp(
@@ -75,6 +116,7 @@ struct MonitoredApp: Identifiable, Codable, Equatable, Hashable {
             dockTileNames: ["QQ"],
             isEnabled: true,
             supportsTenantRail: false,
+            sumsUnreadInDockBadge: true,
             isBuiltIn: true
         )
     ]
@@ -88,6 +130,7 @@ struct MonitoredApp: Identifiable, Codable, Equatable, Hashable {
             dockTileNames: ["钉钉", "DingTalk"],
             isEnabled: true,
             supportsTenantRail: true,
+            sumsUnreadInDockBadge: true,
             isBuiltIn: false
         ),
         MonitoredApp(
@@ -98,6 +141,7 @@ struct MonitoredApp: Identifiable, Codable, Equatable, Hashable {
             dockTileNames: ["企业微信", "WeCom", "WXWork"],
             isEnabled: true,
             supportsTenantRail: false,
+            sumsUnreadInDockBadge: true,
             isBuiltIn: false
         ),
         MonitoredApp(
@@ -108,6 +152,7 @@ struct MonitoredApp: Identifiable, Codable, Equatable, Hashable {
             dockTileNames: ["Slack"],
             isEnabled: true,
             supportsTenantRail: true,
+            sumsUnreadInDockBadge: false,
             isBuiltIn: false
         ),
         MonitoredApp(
@@ -118,6 +163,7 @@ struct MonitoredApp: Identifiable, Codable, Equatable, Hashable {
             dockTileNames: ["Telegram"],
             isEnabled: true,
             supportsTenantRail: false,
+            sumsUnreadInDockBadge: true,
             isBuiltIn: false
         ),
         MonitoredApp(
@@ -128,6 +174,7 @@ struct MonitoredApp: Identifiable, Codable, Equatable, Hashable {
             dockTileNames: ["Discord"],
             isEnabled: true,
             supportsTenantRail: false,
+            sumsUnreadInDockBadge: false,
             isBuiltIn: false
         ),
         MonitoredApp(
@@ -138,11 +185,11 @@ struct MonitoredApp: Identifiable, Codable, Equatable, Hashable {
             dockTileNames: ["邮件", "Mail"],
             isEnabled: true,
             supportsTenantRail: false,
+            sumsUnreadInDockBadge: true,
             isBuiltIn: false
         )
     ]
 
-    /// Inspects any macOS `.app` bundle URL selected by the user and builds a `MonitoredApp` descriptor automatically.
     static func fromApplicationBundle(url: URL) -> MonitoredApp? {
         guard let bundle = Bundle(url: url),
               let bundleId = bundle.bundleIdentifier,
@@ -164,7 +211,6 @@ struct MonitoredApp: Identifiable, Codable, Equatable, Hashable {
         if let n1 = info["CFBundleName"] as? String, !n1.isEmpty { names.insert(n1) }
         if let n2 = info["CFBundleDisplayName"] as? String, !n2.isEmpty { names.insert(n2) }
 
-        // Detect nested notification helper apps inside Contents/Frameworks if any
         var helpers: [String] = []
         let frameworksURL = url.appendingPathComponent("Contents/Frameworks", isDirectory: true)
         if let items = try? FileManager.default.contentsOfDirectory(at: frameworksURL, includingPropertiesForKeys: nil) {
@@ -183,6 +229,7 @@ struct MonitoredApp: Identifiable, Codable, Equatable, Hashable {
             dockTileNames: Array(names),
             isEnabled: true,
             supportsTenantRail: false,
+            sumsUnreadInDockBadge: true,
             isBuiltIn: false
         )
     }
@@ -222,13 +269,28 @@ enum DockBadgeReading: Equatable {
     }
 }
 
+enum ConversationAttentionKind: String, Codable, Equatable {
+    case directOrUnmuted
+    case mentionedInMuted
+    case mutedNoise
+}
+
 struct ConversationSnapshot: Equatable {
     let appId: String
     let tenantName: String?
     let title: String
     let preview: String
     let badgeText: String
+    let hasStandaloneNumericBadge: Bool
+    let hasExplicitMuteSignal: Bool
+    let hasMentionBreakthrough: Bool
     let pid: pid_t
+
+    var badgeIntValue: Int? {
+        let digits = badgeText.filter { $0.isNumber }
+        guard let val = Int(digits), val > 0 else { return nil }
+        return val
+    }
 }
 
 struct TenantBadgeHint: Equatable, Identifiable {
@@ -236,6 +298,7 @@ struct TenantBadgeHint: Equatable, Identifiable {
     let appId: String
     let tenantName: String
     let badgeText: String
+    let isDotOnly: Bool
     let isSelected: Bool
 }
 
@@ -263,6 +326,7 @@ struct MessageItem: Identifiable, Equatable, Codable {
     var subtitle: String
     var body: String
     var unreadBadgeText: String?
+    var hasMentionBreakthrough: Bool
     let firstObservedAt: Date
     var latestActivityAt: Date
     var isTimestampExact: Bool
@@ -270,6 +334,67 @@ struct MessageItem: Identifiable, Equatable, Codable {
     var sourceKind: EntrySourceKind
     var lastNotifiedOverdueAt: Date?
     var contentRevision: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, appId, bundleId, tenantName, sender, subtitle, body, unreadBadgeText, hasMentionBreakthrough
+        case firstObservedAt, latestActivityAt, isTimestampExact, snoozedUntil, sourceKind, lastNotifiedOverdueAt, contentRevision
+    }
+
+    init(
+        id: String,
+        appId: String,
+        bundleId: String,
+        tenantName: String?,
+        sender: String,
+        subtitle: String,
+        body: String,
+        unreadBadgeText: String?,
+        hasMentionBreakthrough: Bool = false,
+        firstObservedAt: Date,
+        latestActivityAt: Date,
+        isTimestampExact: Bool,
+        snoozedUntil: Date?,
+        sourceKind: EntrySourceKind,
+        lastNotifiedOverdueAt: Date?,
+        contentRevision: String
+    ) {
+        self.id = id
+        self.appId = appId
+        self.bundleId = bundleId
+        self.tenantName = tenantName
+        self.sender = sender
+        self.subtitle = subtitle
+        self.body = body
+        self.unreadBadgeText = unreadBadgeText
+        self.hasMentionBreakthrough = hasMentionBreakthrough
+        self.firstObservedAt = firstObservedAt
+        self.latestActivityAt = latestActivityAt
+        self.isTimestampExact = isTimestampExact
+        self.snoozedUntil = snoozedUntil
+        self.sourceKind = sourceKind
+        self.lastNotifiedOverdueAt = lastNotifiedOverdueAt
+        self.contentRevision = contentRevision
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        appId = try c.decode(String.self, forKey: .appId)
+        bundleId = try c.decode(String.self, forKey: .bundleId)
+        tenantName = try c.decodeIfPresent(String.self, forKey: .tenantName)
+        sender = try c.decode(String.self, forKey: .sender)
+        subtitle = try c.decodeIfPresent(String.self, forKey: .subtitle) ?? ""
+        body = try c.decode(String.self, forKey: .body)
+        unreadBadgeText = try c.decodeIfPresent(String.self, forKey: .unreadBadgeText)
+        hasMentionBreakthrough = try c.decodeIfPresent(Bool.self, forKey: .hasMentionBreakthrough) ?? false
+        firstObservedAt = try c.decode(Date.self, forKey: .firstObservedAt)
+        latestActivityAt = try c.decode(Date.self, forKey: .latestActivityAt)
+        isTimestampExact = try c.decodeIfPresent(Bool.self, forKey: .isTimestampExact) ?? false
+        snoozedUntil = try c.decodeIfPresent(Date.self, forKey: .snoozedUntil)
+        sourceKind = try c.decode(EntrySourceKind.self, forKey: .sourceKind)
+        lastNotifiedOverdueAt = try c.decodeIfPresent(Date.self, forKey: .lastNotifiedOverdueAt)
+        contentRevision = try c.decode(String.self, forKey: .contentRevision)
+    }
 
     func isSnoozed(at now: Date) -> Bool {
         guard let snoozedUntil else { return false }
@@ -291,6 +416,9 @@ struct MessageItem: Identifiable, Equatable, Codable {
     func ageLabel(at now: Date, overdueMinutes: Int) -> String {
         if let snoozedUntil, now < snoozedUntil {
             let left = max(1, Int(ceil(snoozedUntil.timeIntervalSince(now) / 60.0)))
+            if left >= 60 {
+                return "稍后 \(left / 60)h"
+            }
             return "稍后 \(left)m"
         }
         let secs = max(0, Int(now.timeIntervalSince(firstObservedAt)))
@@ -310,6 +438,39 @@ struct MessageItem: Identifiable, Equatable, Codable {
             return isTimestampExact ? "已等 \(core)" : "发现 \(core)"
         }
         return core
+    }
+}
+
+enum HotKeyPreset: String, CaseIterable, Identifiable, Codable {
+    case optionM = "optionM"
+    case optionSpace = "optionSpace"
+    case ctrlOptionM = "ctrlOptionM"
+    case cmdShiftM = "cmdShiftM"
+
+    var id: String { rawValue }
+
+    var displayLabel: String {
+        switch self {
+        case .optionM: return "⌥ + M"
+        case .optionSpace: return "⌥ + Space"
+        case .ctrlOptionM: return "⌃ + ⌥ + M"
+        case .cmdShiftM: return "⌘ + ⇧ + M"
+        }
+    }
+
+    var keyCode: UInt32 {
+        switch self {
+        case .optionSpace: return UInt32(kVK_Space)
+        case .optionM, .ctrlOptionM, .cmdShiftM: return UInt32(kVK_ANSI_M)
+        }
+    }
+
+    var carbonModifiers: UInt32 {
+        switch self {
+        case .optionM, .optionSpace: return UInt32(optionKey)
+        case .ctrlOptionM: return UInt32(controlKey | optionKey)
+        case .cmdShiftM: return UInt32(cmdKey | shiftKey)
+        }
     }
 }
 
